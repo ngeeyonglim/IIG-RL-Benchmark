@@ -1,3 +1,3 @@
 [submodule "dh3"]
 	path = dh3
-	url = git@github.com:gabrfarina/dh3.git
+	url = https://github.com/gabrfarina/dh3
