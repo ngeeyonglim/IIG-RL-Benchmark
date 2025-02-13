@@ -81,7 +81,7 @@ This command will kick off head2head evaluation for the agents listed in the eva
 
 ## Games
 
-The following games are also available to play against RL agents in this [online demo](https://www.nathanlichtle.com/research/2p0s).
+The following games are also available to play against our RL agents in this [online demo](https://www.nathanlichtle.com/research/2p0s).
 
 ### Phantom Tic-Tac-Toe (PTTT)
 
