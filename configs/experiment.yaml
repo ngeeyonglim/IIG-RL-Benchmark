@@ -7,7 +7,7 @@ game: classical_phantom_ttt  # game to train on (see list in main.py)
 save_dir: 'results'  # top level saving directory
 group_name: 'test'  # name of the folder this experiment will be in
 experiment_dir: ''  # this will be set in the code
-compute_exploitability: False  # whether to compute exploitability (using the dh3 library)
+compute_exploitability: False  # whether to compute exploitability (using the exp-a-spiel library)
 compute_exploitability_every: 500_000  # in steps
 run_in_safe_mode: True # whether to run in safe mode
 job_id: -1  # job id for array jobs (just for logging)

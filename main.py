@@ -11,7 +11,7 @@ import torch
 import traceback
 import uuid
 
-from algorithms.dh3_exploitability import compute_exploitability, build_traverser
+from algorithms.eas_exploitability import compute_exploitability, build_traverser
 from algorithms.runner import get_runner_cls
 from utils import log_to_csv, get_metadata, log_memory_usage_periodically
 
@@ -108,7 +108,7 @@ def main(cfg: DictConfig):
         print("Building traverser... (this can take a few minutes)")
         traverser = build_traverser(cfg.game)
         print("Done")
-        metadata['dh3_traverser_build_time'] = time.time() - t0_traverser
+        metadata['eas_traverser_build_time'] = time.time() - t0_traverser
         with open(metadata_path, 'w') as json_file:
             json.dump(metadata, json_file, indent=4)
         exploitability_log_file = os.path.join(cfg.experiment_dir, "exploitability.csv")

@@ -1,4 +1,4 @@
-from algorithms.dh3_exploitability import (
+from algorithms.eas_exploitability import (
     build_traverser,
     compute_exploitability_cached,
 )
@@ -37,7 +37,7 @@ class PGModel(torch.nn.Module):
         return self.model(x)
 
 
-def dh3_expl_cb(
+def eas_expl_cb(
     t,
     game,
     model_p0,
@@ -46,7 +46,7 @@ def dh3_expl_cb(
     probs_0=None,
     probs_1=None,
 ):
-    print("Running dh3 best response (this will take a few minutes)")
+    print("Running eas best response (this will take a few minutes)")
     ev0, expl0, expl1, cached_probs_0, cached_probs_1 = compute_exploitability_cached(
         model_p0,
         model_p1,
@@ -196,7 +196,7 @@ def main(args):
 
         action_selection = [player_0_action_selection, player_1_action_selection]
 
-        expl_dict = dh3_expl_cb(
+        expl_dict = eas_expl_cb(
             t,
             game,
             model_p0,

@@ -1,8 +1,10 @@
 # IIG-RL-Benchmark
 
-IIG-RL-Benchmark is a library for running game theoretical and deep RL algorithms on OpenSpiel games. Furthermore, we compute exact exploitability using the [DH3 library](https://github.com/gabrfarina/dh3) which currently supports Phantom Tic-Tac-Toe and 3x3 Dark Hex, as well as their abrupt versions.
+IIG-RL-Benchmark is a library for running game theoretical and deep RL algorithms on OpenSpiel games. Furthermore, we compute exact exploitability using the [exp-a-spiel](https://github.com/gabrfarina/exp-a-spiel) library which currently supports Phantom Tic-Tac-Toe and 3x3 Dark Hex, as well as their abrupt versions.
 
 Paper: [TODO](https://arxiv.com)
+
+Play against RL: [Online demo](https://www.nathanlichtle.com/research/2p0s)
 
 ## Citation
 
@@ -19,15 +21,15 @@ Ensure that your conda is not activated to prevent spawning dual virtual environ
 git clone https://github.com/nathanlct/IIG-RL-Benchmark.git
 cd IIG-RL-Benchmark
 
-# updates the dh3 repo with approriate commit
+# Update the exp-a-spiel (eas) dependency
 git submodule init
 git submodule update
 
-# do this from the top level repo! This will install dh3 and some dependencies. Make sure to do this from top level repo.
+# This will install eas and its dependencies. Make sure to do this from the top level repo.
 pixi install
 pixi shell
 
-# Install our custom OpenSpiel (with fixes fixes for PTTT and DH3 and the addition of abrupt PTTT) (our default is python = 3.11 )
+# Install our custom OpenSpiel (with fixes fixes for PTTT and DH3 and the addition of abrupt PTTT) (our default is python = 3.11)
 # If your system isn't linux or you're not on python 3.11, choose the variant for your system (https://github.com/nathanlct/open_spiel/releases)
 pip uninstall open_spiel -y
 pip install https://github.com/nathanlct/open_spiel/releases/download/v1.pttt/open_spiel-1.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -36,15 +38,15 @@ pip install https://github.com/nathanlct/open_spiel/releases/download/v1.pttt/op
 pip install -r requirements.txt
 ```
 
-### Installing DH3 on MacOS
+### Installing exp-a-spiel on MacOS
 
-The DH3 dependency (which is only required to compute exact exploitability of policies) supports installation on Linux. To install on OSX, use the following branch in DH3 (which has not been extensively tested): `osx_install` ([link](https://github.com/gabrfarina/dh3/tree/osx_install)).
+The exp-a-spiel dependency (which is only required to compute exact exploitability of policies) supports installation on Linux. To install on OSX, use the following branch in exp-a-spiel (which has not been extensively tested): `osx_install` ([link](https://github.com/gabrfarina/exp-a-spiel/tree/osx_install)).
 
-### (Optional alternative) Installing DH3 via `pip`
+### (Optional alternative) Installing exp-a-spiel via `pip`
 
 ```
 cd IIG-RL-Benchmark
-pip install ./dh3 
+pip install ./eas
 ```
 
 ## Usage
@@ -77,6 +79,6 @@ See the `configs` folder for all available command-line arguments.
 python head2head/head2head_eval.py --agents-yaml path/to/example.yaml --save-dir <save-dir>
 ```
 
-This command will kick off head2head evaluation for the agents listed in the eval `yaml` using the `dh3` library. 
+This command will kick off head2head evaluation for the agents listed in the eval `yaml` using the `eas` library. 
 
 
