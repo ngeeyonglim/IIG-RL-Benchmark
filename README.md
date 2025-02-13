@@ -1,6 +1,6 @@
 # IIG-RL-Benchmark
 
-IIG-RL-Benchmark is a library for running game theoretical and deep RL algorithms on OpenSpiel games. Furthermore, we compute exact exploitability using the [exp-a-spiel](https://github.com/gabrfarina/exp-a-spiel) library which currently supports Phantom Tic-Tac-Toe and 3x3 Dark Hex, as well as their abrupt versions.
+IIG-RL-Benchmark is a library for running game theoretical and deep RL algorithms on [OpenSpiel](https://github.com/google-deepmind/open_spiel) games. Furthermore, we compute exact exploitability using the [exp-a-spiel](https://github.com/gabrfarina/exp-a-spiel) library which currently supports Phantom Tic-Tac-Toe and 3x3 Dark Hex, as well as their abrupt versions.
 
 Paper: [TODO](https://arxiv.com)
 
@@ -71,9 +71,7 @@ See the `configs` folder for all available command-line arguments.
 
 ## Evaluating head2head 
 
-
 - Input the paths and algorithm names into a `yaml` file like the example in `head2head/example.yaml`
-
 
 ```
 python head2head/head2head_eval.py --agents-yaml path/to/example.yaml --save-dir <save-dir>
@@ -81,4 +79,22 @@ python head2head/head2head_eval.py --agents-yaml path/to/example.yaml --save-dir
 
 This command will kick off head2head evaluation for the agents listed in the eval `yaml` using the `eas` library. 
 
+## Games
 
+The following games are also available to play against RL agents in this [online demo](https://www.nathanlichtle.com/research/2p0s).
+
+### Phantom Tic-Tac-Toe (PTTT)
+
+**Tic-Tac-Toe:** Players take turn placing their symbol (X or O) on a 3x3 grid. The goal is to form a horizontal, vertical, or diagonal line of your symbol. X plays first.
+
+**Phantom:** The opponent's moves are hidden. Selecting an occupied cell reveals it, and the player's turn continues.
+
+**Abrupt PTTT**: In the abrupt variant, if a player's move reveals an opponent's symbol, their turn ends.
+
+### 3x3 Dark Hex (DH3)
+
+**Hex:** Players take turns placing their stones (red or blue) on a 3x3 hexagonal board. The goal is to form a chain of adjacent stones connecting both sides of your color. Red plays first.
+
+**Dark:** The opponent's moves are hidden. Selecting an occupied cell reveals it, and the player's turn continues.
+
+**Abrupt DH3:** In the abrupt variant, if a player's move reveals an opponent's symbol, their turn ends.
