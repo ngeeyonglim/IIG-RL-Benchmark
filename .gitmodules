@@ -1,3 +1,4 @@
-[submodule "dh3"]
-	path = dh3
-	url = https://github.com/gabrfarina/dh3
+[submodule "eas"]
+	path = eas
+	url = https://github.com/gabrfarina/exp-a-spiel
+	branch = main
