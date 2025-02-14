@@ -2,7 +2,7 @@
 
 IIG-RL-Benchmark is a library for running game theoretical and deep RL algorithms on [OpenSpiel](https://github.com/google-deepmind/open_spiel) games. Furthermore, we compute exact exploitability using the [exp-a-spiel](https://github.com/gabrfarina/exp-a-spiel) library which currently supports Phantom Tic-Tac-Toe and 3x3 Dark Hex, as well as their abrupt versions.
 
-Paper: [[TODO](https://arxiv.com)](https://arxiv.org/abs/2502.08938)
+Paper: [arxiv.org/abs/2502.08938](https://arxiv.org/abs/2502.08938)
 
 Play against RL: [Online demo](https://www.nathanlichtle.com/research/2p0s)
 
