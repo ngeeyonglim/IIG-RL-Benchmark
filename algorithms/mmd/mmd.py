@@ -25,8 +25,7 @@ import time
 
 import numpy as np
 import torch
-from torch import nn
-from torch import optim
+from torch import nn, optim
 from torch.distributions.categorical import Categorical
 
 from open_spiel.python.rl_agent import StepOutput
@@ -471,9 +470,9 @@ class MMD(nn.Module):
 
                 loss = (
                     pg_loss
-                    - self.entropy_coef * ent_kl_coef_mult * entropy_loss
+                    - self.entropy_coef * entropy_loss
                     + self.value_coef * v_loss
-                    + self.kl_coef * ent_kl_coef_mult * backward_kl_loss
+                    + self.kl_coef * backward_kl_loss
                 )
 
                 self.optimizer.zero_grad()
