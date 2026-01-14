@@ -27,9 +27,8 @@ import torch
 import os
 
 import pyspiel
-from algorithms.iem_ppo.iem_ppo import PPO
-from algorithms.iem_ppo.iem_ppo import PPOAgent
-from algorithms.iem_ppo.iem import IEModule
+from algorithms.mec_ppo.mec_ppo import PPO
+from algorithms.mec_ppo.mec_ppo import PPOAgent
 from open_spiel.python.rl_environment import ChanceEventSampler
 from open_spiel.python.rl_environment import Environment
 from open_spiel.python.vector_env import SyncVectorEnv
@@ -97,16 +96,15 @@ class RunPPO:
             normalize_advantages=self.config.norm_adv,
             clip_coef=self.config.clip_coef,
             clip_vloss=self.config.clip_vloss,
-            entropy_coef=self.config.ent_coef,
+            # entropy_coef=self.config.ent_coef,
+            hinge_coef=self.config.hinge_coef,
+            entropy_target=self.config.entropy_target,
             value_coef=self.config.vf_coef,
             max_grad_norm=self.config.max_grad_norm,
             target_kl=self.config.target_kl,
             device=device,
             agent_fn=self.agent_fn,
             log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
-            iem_p0=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-            iem_p1=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-            beta=self.config.beta
         )
 
         time_steps = envs.reset()

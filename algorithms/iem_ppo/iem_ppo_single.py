@@ -24,7 +24,6 @@ Currently only supports the single-agent case.
 import time
 
 import numpy as np
-import os
 import torch
 from torch import nn
 from torch import optim
@@ -205,8 +204,7 @@ class PPO(nn.Module):
         device="cpu",
         agent_fn=PPOAtariAgent,
         log_file=None,
-        iem_p0=None,
-        iem_p1=None,
+        iem=None,
         beta=0.1,
         **kwargs,
     ):
@@ -268,8 +266,7 @@ class PPO(nn.Module):
         self.start_time = time.time()
 
         # Initialize exploration module
-        self.iem_p0 = iem_p0
-        self.iem_p1 = iem_p1
+        self.iem = iem
 
         # Init for entropy logging (1)
         self.accumulated_entropy = 0.0
@@ -282,7 +279,6 @@ class PPO(nn.Module):
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
-
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -337,7 +333,7 @@ class PPO(nn.Module):
                     [ts.current_player() for ts in time_step]
                 ).to(self.device)
 
-                action, logprob, entropy, value, probs = self.get_action_and_value(
+                action, logprob, _, value, probs = self.get_action_and_value(
                     obs, legal_actions_mask=legal_actions_mask
                 )
 
@@ -348,8 +344,6 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
-                self.accumulated_entropy += entropy.mean().item()
-                self.entropy_count += 1
 
                 agent_output = [
                     StepOutput(action=a.item(), probs=p)
@@ -421,80 +415,36 @@ class PPO(nn.Module):
         b_actions = self.actions.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_players = self.current_players.reshape(-1)
+        b_dones = self.dones.reshape(-1)
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
+        adaptive_beta = 0.0
 
-        # iem logging
-        b_rint_raw = torch.zeros(B, device=self.device)        # raw r from IEM
-        b_rint_raw_p0 = torch.zeros(B, device=self.device)     # raw r for p0 positions (else 0)
-        b_rint_raw_p1 = torch.zeros(B, device=self.device)     # raw r for p1 positions (else 0)
-
-        if (self.iem_p1 is not None) and (self.iem_p0 is not None):
-            b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
-            b_dones = self.dones.reshape(-1)
-
-            alive = (b_dones == 0)
-            mask0 = (b_players == 0) & alive
-            if mask0.any():
-                _i1 = self.iem_p0.update(b_obs_full[mask0])   # trains predictor + increments counts
-
-            mask1 = (b_players == 1) & alive
-            if mask1.any():
-                _i2 = self.iem_p1.update(b_obs_full[mask1])
+        if self.iem is not None:
+            _ = self.iem.update(b_obs.detach())
 
             with torch.no_grad():
-                mask0 = (b_players == 0) & alive
-                if mask0.any():
-                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
+                r_int = self.iem.intrinsic_reward(b_obs).detach()
 
-                    b_rint_raw[mask0] = r0
-                    b_rint_raw_p0[mask0] = r0
+                r_int = r_int * (1.0 - b_dones)  # mask terminals
 
-                    tmp0 = torch.zeros_like(b_rint)
-                    tmp0[mask0] = r0
-
-                    vals0 = tmp0[mask0]
-                    # if vals0.numel() > 1:
-                    #     tmp0[mask0] = (vals0 - vals0.mean()) / (vals0.std() + 1e-8)
-                    # else:
-                    #     tmp0[mask0] = 0.0
-
-                    b_rint += self.beta * tmp0
-
-                mask1 = (b_players == 1) & alive
-                if mask1.any():
-                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])  # [#mask1]
-
-                    b_rint_raw[mask1] = r1
-                    b_rint_raw_p1[mask1] = r1
-
-                    tmp1 = torch.zeros_like(b_rint)
-                    tmp1[mask1] = r1
-
-                    vals1 = tmp1[mask1]
-                    # if vals1.numel() > 1:
-                    #     tmp1[mask1] = (vals1 - vals1.mean()) / (vals1.std() + 1e-8)
-                    # else:
-                    #     tmp1[mask1] = 0.0
-
-                    b_rint += self.beta * tmp1
+                # Standardize intrinsic reward
+                b_rint = (r_int - r_int.mean()) / (r_int.std() + 1e-8)
                 
-                assert mask0.sum() > 0
-                assert mask1.sum() > 0
-                assert mask0.sum() + mask1.sum() == alive.sum()
-                # print(_i1, _i2)
+                # Adaptive Beta: Intrinsic signal ~20% of Extrinsic signal
+                std_ext = b_advantages.std() + 1e-8
+                std_int = b_rint.std() + 1e-8
                 
+                # adaptive_beta = torch.clamp(0.2 * (std_ext / std_int), max=1.0)
 
-        else:
-            raise ValueError("IEM modules not initialized in PPO")
+
 
         b_returns = returns.reshape(-1)
         b_values = self.values.reshape(-1)
         b_playersigns = -2.0 * b_players + 1.0   # +1 for p0, -1 for p1
         b_advantages_ext = b_advantages          # keep a pure extrinsic copy
         b_advantages = b_advantages_ext * b_playersigns
-        b_advantages = b_advantages + b_rint # if iem reward not normalized
-
+        b_advantages = b_advantages + self.beta * b_rint
 
         # Optimizing the policy and value network
         b_inds = np.arange(self.batch_size)
@@ -521,21 +471,11 @@ class PPO(nn.Module):
                         ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
                     ]
 
-                
                 mb_advantages = b_advantages[mb_inds]
                 if self.normalize_advantages:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (
                         mb_advantages.std() + 1e-8
                     )
-
-                # mb_adv_ext = (b_advantages_ext[mb_inds] * b_playersigns[mb_inds])
-
-                # if self.normalize_advantages:
-                #     mb_adv_ext = (mb_adv_ext - mb_adv_ext.mean()) / (mb_adv_ext.std() + 1e-8)
-
-                # # Add intrinsic AFTER normalization so intrinsic is not normalized
-                # mb_advantages = mb_adv_ext + b_rint[mb_inds]
-
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
@@ -579,36 +519,20 @@ class PPO(nn.Module):
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
+        # Logging entropy (2)
+        current_batch_entropy = entropy.mean().item()
+        self.accumulated_entropy += current_batch_entropy
+        self.entropy_count += 1
+
         # Check if 10,000 steps have passed since the last log
         if self.total_steps_done - self.last_log_step >= self.log_interval:
             avg_entropy = self.accumulated_entropy / self.entropy_count
-
-            p0_vals = b_rint_raw_p0[mask0]
-            p1_vals = b_rint_raw_p1[mask1]
-
-            def stats(x):
-                if x.numel() == 0:
-                    return 0.0, 0.0
-                return x.mean().item(), x.std(unbiased=False).item()
-            
-            p0_mean, p0_std = stats(p0_vals)
-            p1_mean, p1_std = stats(p1_vals)
-    
             
             log_data = {
                 "steps": self.total_steps_done,
-                "avg_entropy": avg_entropy,
-
-                # iem
-                # "iem_p0_raw_vec": p0_vals,
-                "iem_p0_raw_mean": p0_mean,
-                "iem_p0_raw_std": p0_std,
-                # "iem_p1_raw_vec": p1_vals,
-                "iem_p1_raw_mean": p1_mean,
-                "iem_p1_raw_std": p1_std,
+                "avg_entropy": avg_entropy
             }
-
-
+            
             # Use the utility to write to train_log.csv
             log_to_csv(log_data, self.log_file)
             

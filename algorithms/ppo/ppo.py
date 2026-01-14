@@ -262,6 +262,12 @@ class PPO(nn.Module):
         self.updates_done = 0
         self.start_time = time.time()
 
+        # Entropy tracking
+        self.accumulated_entropy = 0.0   # sum of mean entropies across step() calls
+        self.entropy_count = 0           # number of step() calls accumulated
+        self.last_log_step = 0           # last self.total_steps_done when we logged
+        self.log_interval = 10000        # in "environment steps" (same units as total_steps_done)
+
     def get_value(self, x):
         return self.network.get_value(x)
 
@@ -321,7 +327,7 @@ class PPO(nn.Module):
                     [ts.current_player() for ts in time_step]
                 ).to(self.device)
 
-                action, logprob, _, value, probs = self.get_action_and_value(
+                action, logprob, entropy, value, probs = self.get_action_and_value(
                     obs, legal_actions_mask=legal_actions_mask
                 )
 
@@ -332,6 +338,10 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
+
+                # entropy tracking
+                self.accumulated_entropy += entropy.mean().item()
+                self.entropy_count += 1
 
                 agent_output = [
                     StepOutput(action=a.item(), probs=p)
@@ -477,6 +487,23 @@ class PPO(nn.Module):
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+
+        # Check if 10,000 steps have passed since the last log
+        if self.total_steps_done - self.last_log_step >= self.log_interval:
+            avg_entropy = self.accumulated_entropy / self.entropy_count
+            
+            log_data = {
+                "steps": self.total_steps_done,
+                "avg_entropy": avg_entropy
+            }
+            
+            # Use the utility to write to train_log.csv
+            log_to_csv(log_data, self.log_file)
+            
+            # Reset trackers for the next interval
+            self.accumulated_entropy = 0.0
+            self.entropy_count = 0
+            self.last_log_step = self.total_steps_done
 
         # Commented this out because it takes too much disk space for the large sweep
         # log_data = {

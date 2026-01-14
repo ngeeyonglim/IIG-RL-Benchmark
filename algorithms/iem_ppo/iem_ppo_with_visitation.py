@@ -23,6 +23,9 @@ Currently only supports the single-agent case.
 
 import time
 
+# from collections import Counter
+# import hashlib
+
 import numpy as np
 import os
 import torch
@@ -277,12 +280,38 @@ class PPO(nn.Module):
         self.last_log_step = 0
         self.log_interval = 10000
 
+        # # Visitation tracking
+        # self.track_visitation = True
+        # self.visitation_topk = 50
+        # self.visitation_csv_path = self.log_file.replace("train_log.csv", "visitation_topk.csv")
+
+        # # Write CSV header once
+        # if self.track_visitation and not os.path.exists(self.visitation_csv_path):
+        #     with open(self.visitation_csv_path, "w") as f:
+        #         f.write("steps,player,infoset_id,count\n")
+
+        # self.visitation_quantize = True
+
     def get_value(self, x):
         return self.network.get_value(x)
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
+    
+    def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
+        """
+        Stable infoset identity from info_state tensor.
+        x: shape [D] numpy array (float or int)
+        Returns: short hex string id
+        """
+        if self.visitation_quantize:
+            # info_state in OpenSpiel is typically 0/1; quantize to int8 to avoid float noise
+            xb = np.rint(x).astype(np.int8, copy=False).tobytes()
+        else:
+            xb = x.astype(np.float32, copy=False).tobytes()
 
+        # fast, stable hash; 8 bytes digest is enough for logging
+        return hashlib.blake2b(xb, digest_size=8).hexdigest()
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -423,6 +452,53 @@ class PPO(nn.Module):
         b_players = self.current_players.reshape(-1)
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
+
+        # LOG: visitation logging
+        if self.track_visitation:
+            # Move to CPU once (cheap)
+            b_obs_np = b_obs.detach().cpu().numpy()          # [B, D]
+            b_players_np = b_players.detach().cpu().numpy().astype(np.int32)  # [B]
+            alive_np = (1.0 - self.dones.reshape(-1).detach().cpu().numpy()).astype(bool)  # [B]
+
+            # Compute ids only for alive transitions
+            ids = [None] * B
+            for i in range(B):
+                if alive_np[i]:
+                    ids[i] = self._infoset_id_from_tensor(b_obs_np[i])
+
+            # Per-player counters for this update
+            c0 = Counter()
+            c1 = Counter()
+            for i in range(B):
+                if not alive_np[i]:
+                    continue
+                if b_players_np[i] == 0:
+                    c0[ids[i]] += 1
+                elif b_players_np[i] == 1:
+                    c1[ids[i]] += 1
+
+            # Summary stats (good for plotting)
+            def _counter_stats(c: Counter):
+                total = sum(c.values())
+                uniq = len(c)
+                if total == 0 or uniq == 0:
+                    return dict(total=0, uniq=0, top10_share=0.0, entropy=0.0)
+                # top-10 share
+                top10 = sum(v for _, v in c.most_common(10))
+                top10_share = top10 / total
+                # entropy over visited ids in this batch (normalized optional)
+                ps = np.array(list(c.values()), dtype=np.float64) / total
+                ent = float(-(ps * np.log(ps + 1e-12)).sum())
+                # normalize by log(K) so 0..1-ish
+                ent_norm = float(ent / (np.log(uniq + 1e-12)))
+                return dict(total=total, uniq=uniq, top10_share=float(top10_share), entropy_norm=ent_norm)
+
+            s0 = _counter_stats(c0)
+            s1 = _counter_stats(c1)
+
+            # Add scalars into your existing log_data dict (where you already log entropy/IEM stats)
+            # NOTE: this assumes you later create log_data = {...} and call log_to_csv(log_data,...)
+            self._visitation_batch_stats = (s0, s1, c0, c1)
 
         # iem logging
         b_rint_raw = torch.zeros(B, device=self.device)        # raw r from IEM
@@ -608,7 +684,35 @@ class PPO(nn.Module):
                 "iem_p1_raw_std": p1_std,
             }
 
+            # Visitation logging
+            if self.track_visitation and hasattr(self, "_visitation_batch_stats"):
+                s0, s1, c0, c1 = self._visitation_batch_stats
 
+                log_data.update({
+                    "visit_p0_batch_total": s0["total"],
+                    "visit_p0_batch_unique": s0["uniq"],
+                    "visit_p0_batch_top10_share": s0["top10_share"],
+                    "visit_p0_batch_entropy_norm": s0["entropy_norm"],
+
+                    "visit_p1_batch_total": s1["total"],
+                    "visit_p1_batch_unique": s1["uniq"],
+                    "visit_p1_batch_top10_share": s1["top10_share"],
+                    "visit_p1_batch_entropy_norm": s1["entropy_norm"],
+                })
+
+                # Dump top-K states for recency heatmaps later (sparse, scalable)
+                with open(self.visitation_csv_path, "a") as f:
+                    step = int(self.total_steps_done)
+
+                    for infoset_id, cnt in c0.most_common(self.visitation_topk):
+                        f.write(f"{step},0,{infoset_id},{cnt}\n")
+
+                    for infoset_id, cnt in c1.most_common(self.visitation_topk):
+                        f.write(f"{step},1,{infoset_id},{cnt}\n")
+
+                delattr(self, "_visitation_batch_stats")
+
+            
             # Use the utility to write to train_log.csv
             log_to_csv(log_data, self.log_file)
             

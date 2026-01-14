@@ -27,9 +27,9 @@ import torch
 import os
 
 import pyspiel
-from algorithms.iem_ppo.iem_ppo import PPO
-from algorithms.iem_ppo.iem_ppo import PPOAgent
-from algorithms.iem_ppo.iem import IEModule
+from algorithms.new_ppo.new_ppo import PPO
+from algorithms.new_ppo.new_ppo import PPOAgent
+from algorithms.new_ppo.iem import IEModule
 from open_spiel.python.rl_environment import ChanceEventSampler
 from open_spiel.python.rl_environment import Environment
 from open_spiel.python.vector_env import SyncVectorEnv
@@ -97,7 +97,9 @@ class RunPPO:
             normalize_advantages=self.config.norm_adv,
             clip_coef=self.config.clip_coef,
             clip_vloss=self.config.clip_vloss,
-            entropy_coef=self.config.ent_coef,
+            # entropy_coef=self.config.ent_coef,
+            hinge_coef=self.config.hinge_coef,
+            entropy_target=self.config.entropy_target,
             value_coef=self.config.vf_coef,
             max_grad_norm=self.config.max_grad_norm,
             target_kl=self.config.target_kl,

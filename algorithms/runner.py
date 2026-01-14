@@ -29,6 +29,16 @@ def get_runner_cls(algorithm):
         from algorithms.iem_ppo.run_iem_ppo import RunPPO
 
         return RunPPO
+    
+    if algorithm == "mec_ppo":
+        from algorithms.mec_ppo.run_mec_ppo import RunPPO
+
+        return RunPPO
+
+    if algorithm == "new_ppo":
+        from algorithms.new_ppo.run_new_ppo import RunPPO
+
+        return RunPPO
 
     if algorithm == "mmd":
         from algorithms.mmd.run_mmd import RunMMD

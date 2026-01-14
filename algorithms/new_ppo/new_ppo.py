@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of PPO.
+"""An implementation of MEC-PPO.
+
+Merged Implementation: IEM-PPO with Minimum Entropy Constraint (MEC).
+Exploration: Uses IEM to add intrinsic rewards to advantages.
+Regularization: Uses MEC (Hinge Loss) to enforce a minimum entropy floor instead of maximizing it
 
 Note: code adapted (with permission) from
 https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py and
@@ -24,7 +28,6 @@ Currently only supports the single-agent case.
 import time
 
 import numpy as np
-import os
 import torch
 from torch import nn
 from torch import optim
@@ -172,14 +175,11 @@ def legal_actions_to_mask(legal_actions_list, num_actions):
 
 
 class PPO(nn.Module):
-    """PPO Agent implementation in PyTorch.
-
-    See open_spiel/python/examples/ppo_example.py for an usage example.
-
-    Note that PPO runs multiple environments concurrently on each step (see
-    open_spiel/python/vector_env.py). In practice, this tends to improve PPO's
-    performance. The number of parallel environments is controlled by the
-    num_envs argument.
+    """
+    Merged Implementation: IEM-PPO with Minimum Entropy Constraint (MEC).
+    
+    1. Exploration: Uses IEM (Intrinsic Exploration Module) to add intrinsic rewards to advantages.
+    2. Regularization: Uses MEC (Hinge Loss) to enforce a minimum entropy floor instead of maximizing it.
     """
 
     def __init__(
@@ -198,7 +198,7 @@ class PPO(nn.Module):
         normalize_advantages=True,
         clip_coef=0.2,
         clip_vloss=True,
-        entropy_coef=0.01,
+        entropy_coef=0.00,
         value_coef=0.5,
         max_grad_norm=0.5,
         target_kl=None,
@@ -208,6 +208,8 @@ class PPO(nn.Module):
         iem_p0=None,
         iem_p1=None,
         beta=0.1,
+        entropy_target=0.6,
+        hinge_coef=1.0,
         **kwargs,
     ):
         super().__init__()
@@ -235,7 +237,11 @@ class PPO(nn.Module):
         self.normalize_advantages = normalize_advantages
         self.clip_coef = clip_coef
         self.clip_vloss = clip_vloss
-        self.entropy_coef = entropy_coef
+        
+        # MEC Parameters
+        self.hinge_coef = hinge_coef
+        self.entropy_target = entropy_target
+        
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
@@ -283,65 +289,31 @@ class PPO(nn.Module):
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
 
-
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
             with torch.no_grad():
                 legal_actions_mask = legal_actions_to_mask(
-                    [
-                        ts.observations["legal_actions"][ts.current_player()]
-                        for ts in time_step
-                    ],
+                    [ts.observations["legal_actions"][ts.current_player()] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
                 obs = torch.Tensor(
-                    np.array(
-                        [
-                            np.reshape(
-                                ts.observations["info_state"][ts.current_player()],
-                                self.input_shape,
-                            )
-                            for ts in time_step
-                        ]
-                    )
+                    np.array([np.reshape(ts.observations["info_state"][ts.current_player()], self.input_shape) for ts in time_step])
                 ).to(self.device)
-                action, _, _, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
-                )
-                return [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
-                ]
+                action, _, _, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
+                return [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
         else:
             with torch.no_grad():
-                # act
                 obs = torch.Tensor(
-                    np.array(
-                        [
-                            np.reshape(
-                                ts.observations["info_state"][ts.current_player()],
-                                self.input_shape,
-                            )
-                            for ts in time_step
-                        ]
-                    )
+                    np.array([np.reshape(ts.observations["info_state"][ts.current_player()], self.input_shape) for ts in time_step])
                 ).to(self.device)
                 legal_actions_mask = legal_actions_to_mask(
-                    [
-                        ts.observations["legal_actions"][ts.current_player()]
-                        for ts in time_step
-                    ],
+                    [ts.observations["legal_actions"][ts.current_player()] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
-                current_players = torch.Tensor(
-                    [ts.current_player() for ts in time_step]
-                ).to(self.device)
+                current_players = torch.Tensor([ts.current_player() for ts in time_step]).to(self.device)
 
-                action, logprob, entropy, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
-                )
+                action, logprob, entropy, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
 
-                # store
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
                 self.actions[self.cur_batch_idx] = action
@@ -351,67 +323,38 @@ class PPO(nn.Module):
                 self.accumulated_entropy += entropy.mean().item()
                 self.entropy_count += 1
 
-                agent_output = [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
-                ]
+                agent_output = [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
                 return agent_output
 
     def post_step(self, reward, done):
         self.rewards[self.cur_batch_idx] = torch.tensor(reward).to(self.device).view(-1)
         self.dones[self.cur_batch_idx] = torch.tensor(done).to(self.device).view(-1)
-
         self.total_steps_done += self.num_envs
         self.cur_batch_idx += 1
 
     def learn(self, time_step):
+        # 1. Bootstrapping and Advantage Calculation (Unchanged)
         next_obs = torch.Tensor(
-            np.array(
-                [
-                    np.reshape(
-                        ts.observations["info_state"][ts.current_player()],
-                        self.input_shape,
-                    )
-                    for ts in time_step
-                ]
-            )
+            np.array([np.reshape(ts.observations["info_state"][ts.current_player()], self.input_shape) for ts in time_step])
         ).to(self.device)
 
-        
-
-        # bootstrap value if not done
         with torch.no_grad():
             next_value = self.get_value(next_obs).reshape(1, -1)
             if self.gae:
                 advantages = torch.zeros_like(self.rewards).to(self.device)
                 lastgaelam = 0
                 for t in reversed(range(self.steps_per_batch)):
-                    nextvalues = (
-                        next_value
-                        if t == self.steps_per_batch - 1
-                        else self.values[t + 1]
-                    )
+                    nextvalues = next_value if t == self.steps_per_batch - 1 else self.values[t + 1]
                     nextnonterminal = 1.0 - self.dones[t]
-                    delta = (
-                        self.rewards[t]
-                        + self.gamma * nextvalues * nextnonterminal
-                        - self.values[t]
-                    )
-                    advantages[t] = lastgaelam = (
-                        delta
-                        + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
-                    )
+                    delta = self.rewards[t] + self.gamma * nextvalues * nextnonterminal - self.values[t]
+                    advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
                 returns = advantages + self.values
             else:
                 returns = torch.zeros_like(self.rewards).to(self.device)
                 for t in reversed(range(self.steps_per_batch)):
-                    next_return = (
-                        next_value if t == self.steps_per_batch - 1 else returns[t + 1]
-                    )
+                    next_return = next_value if t == self.steps_per_batch - 1 else returns[t + 1]
                     nextnonterminal = 1.0 - self.dones[t]
-                    returns[t] = (
-                        self.rewards[t] + self.gamma * nextnonterminal * next_return
-                    )
+                    returns[t] = self.rewards[t] + self.gamma * nextnonterminal * next_return
                 advantages = returns - self.values
 
         # flatten the batch
@@ -423,11 +366,6 @@ class PPO(nn.Module):
         b_players = self.current_players.reshape(-1)
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
-
-        # iem logging
-        b_rint_raw = torch.zeros(B, device=self.device)        # raw r from IEM
-        b_rint_raw_p0 = torch.zeros(B, device=self.device)     # raw r for p0 positions (else 0)
-        b_rint_raw_p1 = torch.zeros(B, device=self.device)     # raw r for p1 positions (else 0)
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
@@ -446,10 +384,6 @@ class PPO(nn.Module):
                 mask0 = (b_players == 0) & alive
                 if mask0.any():
                     r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
-
-                    b_rint_raw[mask0] = r0
-                    b_rint_raw_p0[mask0] = r0
-
                     tmp0 = torch.zeros_like(b_rint)
                     tmp0[mask0] = r0
 
@@ -464,10 +398,6 @@ class PPO(nn.Module):
                 mask1 = (b_players == 1) & alive
                 if mask1.any():
                     r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])  # [#mask1]
-
-                    b_rint_raw[mask1] = r1
-                    b_rint_raw_p1[mask1] = r1
-
                     tmp1 = torch.zeros_like(b_rint)
                     tmp1[mask1] = r1
 
@@ -495,8 +425,7 @@ class PPO(nn.Module):
         b_advantages = b_advantages_ext * b_playersigns
         b_advantages = b_advantages + b_rint # if iem reward not normalized
 
-
-        # Optimizing the policy and value network
+        # MEC (Hinge Loss)
         b_inds = np.arange(self.batch_size)
         clipfracs = []
         for _ in range(self.update_epochs):
@@ -514,45 +443,24 @@ class PPO(nn.Module):
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [
-                        ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-                    ]
+                    clipfracs += [((ratio - 1.0).abs() > self.clip_coef).float().mean().item()]
 
-                
                 mb_advantages = b_advantages[mb_inds]
                 if self.normalize_advantages:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                        mb_advantages.std() + 1e-8
-                    )
-
-                # mb_adv_ext = (b_advantages_ext[mb_inds] * b_playersigns[mb_inds])
-
-                # if self.normalize_advantages:
-                #     mb_adv_ext = (mb_adv_ext - mb_adv_ext.mean()) / (mb_adv_ext.std() + 1e-8)
-
-                # # Add intrinsic AFTER normalization so intrinsic is not normalized
-                # mb_advantages = mb_adv_ext + b_rint[mb_inds]
-
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                )
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
                 if self.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -self.clip_coef,
-                        self.clip_coef,
-                    )
+                    v_clipped = b_values[mb_inds] + torch.clamp(newvalue - b_values[mb_inds], -self.clip_coef, self.clip_coef)
                     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
@@ -560,11 +468,14 @@ class PPO(nn.Module):
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = (
-                    pg_loss
-                    - self.entropy_coef * entropy_loss
-                    + v_loss * self.value_coef
+                
+                # With Hinge Loss:
+                hinge_penalty = torch.clamp(
+                    self.entropy_target - entropy_loss,
+                    min=0.0
                 )
+                
+                loss = pg_loss + v_loss * self.value_coef + self.hinge_coef * hinge_penalty
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -579,36 +490,16 @@ class PPO(nn.Module):
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
+
         # Check if 10,000 steps have passed since the last log
         if self.total_steps_done - self.last_log_step >= self.log_interval:
             avg_entropy = self.accumulated_entropy / self.entropy_count
-
-            p0_vals = b_rint_raw_p0[mask0]
-            p1_vals = b_rint_raw_p1[mask1]
-
-            def stats(x):
-                if x.numel() == 0:
-                    return 0.0, 0.0
-                return x.mean().item(), x.std(unbiased=False).item()
-            
-            p0_mean, p0_std = stats(p0_vals)
-            p1_mean, p1_std = stats(p1_vals)
-    
             
             log_data = {
                 "steps": self.total_steps_done,
-                "avg_entropy": avg_entropy,
-
-                # iem
-                # "iem_p0_raw_vec": p0_vals,
-                "iem_p0_raw_mean": p0_mean,
-                "iem_p0_raw_std": p0_std,
-                # "iem_p1_raw_vec": p1_vals,
-                "iem_p1_raw_mean": p1_mean,
-                "iem_p1_raw_std": p1_std,
+                "avg_entropy": avg_entropy
             }
-
-
+            
             # Use the utility to write to train_log.csv
             log_to_csv(log_data, self.log_file)
             
@@ -616,39 +507,20 @@ class PPO(nn.Module):
             self.accumulated_entropy = 0.0
             self.entropy_count = 0
             self.last_log_step = self.total_steps_done
+
         
-
-        # Commented this out because it takes too much disk space for the large sweep
-        # log_data = {
-        #     "steps": self.total_steps_done,
-        #     "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
-        #     "losses/value_loss": v_loss.item(),
-        #     "losses/policy_loss": pg_loss.item(),
-        #     "losses/entropy": entropy_loss.item(),
-        #     "losses/old_approx_kl": old_approx_kl.item(),
-        #     "losses/approx_kl": approx_kl.item(),
-        #     "losses/clipfrac": np.mean(clipfracs),
-        #     "losses/explained_variance": explained_var,
-        #     "charts/SPS": int(
-        #         self.total_steps_done / (time.time() - self.start_time)
-        #     ),
-        # }
-        # log_to_csv(log_data, self.log_file)
-
-        # Update counters
         self.updates_done += 1
         self.cur_batch_idx = 0
 
+        
+
     def save(self, path):
-        """Saves the actor weights to path"""
         torch.save(self.network.actor.state_dict(), path)
 
     def load(self, path):
-        """Loads weights from actor checkpoint"""
         self.network.actor.load_state_dict(torch.load(path))
 
     def anneal_learning_rate(self, update, num_total_updates):
-        # Annealing the rate
         frac = max(0, 1.0 - (update / num_total_updates))
         if frac < 0:
             raise ValueError("Annealing learning rate to < 0")
