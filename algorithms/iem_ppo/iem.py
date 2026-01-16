@@ -124,7 +124,8 @@ class IEModule(nn.Module):
         self.r_count = 1e-6
         self.counter = CountHasher()
         self.alpha = alpha
-        print(self.alpha, "iem alpha value")
+        # print(self.alpha, "iem alpha value")
+        print(self.c1, "iem c1 value")
       
     @torch.no_grad()
     def intrinsic_reward(self, obs: torch.Tensor):

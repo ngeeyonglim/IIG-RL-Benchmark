@@ -428,6 +428,8 @@ class PPO(nn.Module):
         b_rint_raw = torch.zeros(B, device=self.device)        # raw r from IEM
         b_rint_raw_p0 = torch.zeros(B, device=self.device)     # raw r for p0 positions (else 0)
         b_rint_raw_p1 = torch.zeros(B, device=self.device)     # raw r for p1 positions (else 0)
+        b_rint_p0 = torch.zeros(B, device=self.device)         # final r for p0 positions (else 0)
+        b_rint_p1 = torch.zeros(B, device=self.device)         # final r for p1 positions (else 0)
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
@@ -447,6 +449,7 @@ class PPO(nn.Module):
                 if mask0.any():
                     r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
 
+                    # logging buffers
                     b_rint_raw[mask0] = r0
                     b_rint_raw_p0[mask0] = r0
 
@@ -460,6 +463,7 @@ class PPO(nn.Module):
                     #     tmp0[mask0] = 0.0
 
                     b_rint += self.beta * tmp0
+                    b_rint_p0 = b_rint.copy()
 
                 mask1 = (b_players == 1) & alive
                 if mask1.any():
@@ -478,6 +482,8 @@ class PPO(nn.Module):
                     #     tmp1[mask1] = 0.0
 
                     b_rint += self.beta * tmp1
+                    b_rint_p1 = b_rint.copy()
+                    
                 
                 assert mask0.sum() > 0
                 assert mask1.sum() > 0
@@ -562,7 +568,7 @@ class PPO(nn.Module):
                 entropy_loss = entropy.mean()
                 loss = (
                     pg_loss
-                    - self.entropy_coef * entropy_loss
+                    # - self.entropy_coef * entropy_loss
                     + v_loss * self.value_coef
                 )
 
@@ -593,6 +599,8 @@ class PPO(nn.Module):
             
             p0_mean, p0_std = stats(p0_vals)
             p1_mean, p1_std = stats(p1_vals)
+            processed_p0_mean, processed_p0_std = stats(b_rint_p0[mask0])
+            processed_p1_mean, processed_p1_std = stats(b_rint_p1[mask1])
     
             
             log_data = {
@@ -606,6 +614,10 @@ class PPO(nn.Module):
                 # "iem_p1_raw_vec": p1_vals,
                 "iem_p1_raw_mean": p1_mean,
                 "iem_p1_raw_std": p1_std,
+                "iem_p0_processed_mean": processed_p0_mean,
+                "iem_p0_processed_std": processed_p0_std,
+                "iem_p1_processed_mean": processed_p1_mean,
+                "iem_p1_processed_std": processed_p1_std,
             }
 
 
