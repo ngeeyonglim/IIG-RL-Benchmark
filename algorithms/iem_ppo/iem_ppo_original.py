@@ -23,9 +23,6 @@ Currently only supports the single-agent case.
 
 import time
 
-from collections import Counter
-import hashlib
-
 import numpy as np
 import os
 import torch
@@ -280,44 +277,12 @@ class PPO(nn.Module):
         self.last_log_step = 0
         self.log_interval = 10000
 
-        # Visitation tracking
-        self.track_visitation = True
-        self.visitation_topk = 50
-        self.visitation_csv_path = self.log_file.replace("train_log.csv", "visitation_topk.csv")
-
-        # Running counters over the current log window
-        self._visit_counter_p0 = Counter()
-        self._visit_counter_p1 = Counter()
-        self._visit_total_p0 = 0
-        self._visit_total_p1 = 0
-
-        # Write CSV header once
-        if self.track_visitation and not os.path.exists(self.visitation_csv_path):
-            with open(self.visitation_csv_path, "w") as f:
-                f.write("steps,player,infoset_id,count\n")
-
-        self.visitation_quantize = True
-
     def get_value(self, x):
         return self.network.get_value(x)
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
-    
-    def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
-        """
-        Stable infoset identity from info_state tensor.
-        x: shape [D] numpy array (float or int)
-        Returns: short hex string id
-        """
-        if self.visitation_quantize:
-            # info_state in OpenSpiel is typically 0/1; quantize to int8 to avoid float noise
-            xb = np.rint(x).astype(np.int8, copy=False).tobytes()
-        else:
-            xb = x.astype(np.float32, copy=False).tobytes()
 
-        # fast, stable hash; 8 bytes digest is enough for logging
-        return hashlib.blake2b(xb, digest_size=8).hexdigest()
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -459,30 +424,12 @@ class PPO(nn.Module):
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
 
-
-        # --- Visitation logging (accumulate over log_interval) ---
-        if self.track_visitation:
-            b_obs_np = b_obs.detach().cpu().numpy()  # [B, D]
-            b_players_np = b_players.detach().cpu().numpy().astype(np.int32)  # [B]
-            dones_np = self.dones.reshape(-1).detach().cpu().numpy()
-            alive_np = (dones_np == 0)  # True where not terminal/padding
-
-            # Update running counters for this batch
-            for i in range(B):
-                if not alive_np[i]:
-                    continue
-                infoset_id = self._infoset_id_from_tensor(b_obs_np[i])
-                if b_players_np[i] == 0:
-                    self._visit_counter_p0[infoset_id] += 1
-                    self._visit_total_p0 += 1
-                elif b_players_np[i] == 1:
-                    self._visit_counter_p1[infoset_id] += 1
-                    self._visit_total_p1 += 1
-
         # iem logging
         b_rint_raw = torch.zeros(B, device=self.device)        # raw r from IEM
         b_rint_raw_p0 = torch.zeros(B, device=self.device)     # raw r for p0 positions (else 0)
         b_rint_raw_p1 = torch.zeros(B, device=self.device)     # raw r for p1 positions (else 0)
+        b_rint_p0 = torch.zeros(B, device=self.device)         # final r for p0 positions (else 0)
+        b_rint_p1 = torch.zeros(B, device=self.device)         # final r for p1 positions (else 0)
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
@@ -502,6 +449,7 @@ class PPO(nn.Module):
                 if mask0.any():
                     r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
 
+                    # logging buffers
                     b_rint_raw[mask0] = r0
                     b_rint_raw_p0[mask0] = r0
 
@@ -515,6 +463,7 @@ class PPO(nn.Module):
                     #     tmp0[mask0] = 0.0
 
                     b_rint += self.beta * tmp0
+                    b_rint_p0 = b_rint.copy()
 
                 mask1 = (b_players == 1) & alive
                 if mask1.any():
@@ -533,6 +482,8 @@ class PPO(nn.Module):
                     #     tmp1[mask1] = 0.0
 
                     b_rint += self.beta * tmp1
+                    b_rint_p1 = b_rint.copy()
+                    
                 
                 assert mask0.sum() > 0
                 assert mask1.sum() > 0
@@ -617,7 +568,7 @@ class PPO(nn.Module):
                 entropy_loss = entropy.mean()
                 loss = (
                     pg_loss
-                    - self.entropy_coef * entropy_loss
+                    # - self.entropy_coef * entropy_loss
                     + v_loss * self.value_coef
                 )
 
@@ -648,6 +599,8 @@ class PPO(nn.Module):
             
             p0_mean, p0_std = stats(p0_vals)
             p1_mean, p1_std = stats(p1_vals)
+            processed_p0_mean, processed_p0_std = stats(b_rint_p0[mask0])
+            processed_p1_mean, processed_p1_std = stats(b_rint_p1[mask1])
     
             
             log_data = {
@@ -661,59 +614,13 @@ class PPO(nn.Module):
                 # "iem_p1_raw_vec": p1_vals,
                 "iem_p1_raw_mean": p1_mean,
                 "iem_p1_raw_std": p1_std,
+                "iem_p0_processed_mean": processed_p0_mean,
+                "iem_p0_processed_std": processed_p0_std,
+                "iem_p1_processed_mean": processed_p1_mean,
+                "iem_p1_processed_std": processed_p1_std,
             }
 
-            # Visitation logging (interval)
-            if self.track_visitation:
-                def _counter_stats(counter: Counter, total_visits: int):
-                    uniq = len(counter)
-                    if total_visits == 0 or uniq == 0:
-                        return dict(total=0, uniq=0, top10_share=0.0, entropy_norm=0.0)
 
-                    top10 = sum(v for _, v in counter.most_common(10))
-                    top10_share = top10 / total_visits
-
-                    ps = np.array(list(counter.values()), dtype=np.float64) / total_visits
-                    ent = float(-(ps * np.log(ps + 1e-12)).sum())
-
-                    # Avoid 0/0 when uniq==1
-                    if uniq <= 1:
-                        ent_norm = 0.0
-                    else:
-                        ent_norm = float(ent / np.log(uniq))
-
-                    return dict(total=total_visits, uniq=uniq, top10_share=float(top10_share), entropy_norm=float(ent_norm))
-
-                s0 = _counter_stats(self._visit_counter_p0, self._visit_total_p0)
-                s1 = _counter_stats(self._visit_counter_p1, self._visit_total_p1)
-
-                log_data.update({
-                    "visit_p0_interval_total": s0["total"],
-                    "visit_p0_interval_unique": s0["uniq"],
-                    "visit_p0_interval_top10_share": s0["top10_share"],
-                    "visit_p0_interval_entropy_norm": s0["entropy_norm"],
-
-                    "visit_p1_interval_total": s1["total"],
-                    "visit_p1_interval_unique": s1["uniq"],
-                    "visit_p1_interval_top10_share": s1["top10_share"],
-                    "visit_p1_interval_entropy_norm": s1["entropy_norm"],
-                })
-
-                # Dump interval top-K to CSV (one row per state)
-                with open(self.visitation_csv_path, "a") as f:
-                    step = int(self.total_steps_done)
-                    for infoset_id, cnt in self._visit_counter_p0.most_common(self.visitation_topk):
-                        f.write(f"{step},0,{infoset_id},{cnt}\n")
-                    for infoset_id, cnt in self._visit_counter_p1.most_common(self.visitation_topk):
-                        f.write(f"{step},1,{infoset_id},{cnt}\n")
-
-                # Reset interval counters for next 10k window
-                self._visit_counter_p0.clear()
-                self._visit_counter_p1.clear()
-                self._visit_total_p0 = 0
-                self._visit_total_p1 = 0
-
-            
             # Use the utility to write to train_log.csv
             log_to_csv(log_data, self.log_file)
             

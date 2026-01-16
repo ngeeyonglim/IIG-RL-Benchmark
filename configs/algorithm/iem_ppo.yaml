@@ -19,4 +19,4 @@ max_grad_norm: 0.5  # the maximum norm for the gradient clipping
 target_kl: null  # the target KL divergence threshold
 iem_lr: 0.0002
 alpha: 0.6  # exponent for scaling intrinsic reward
-beta: 0.001 # amount to scale intrinsic reward
+beta: 0.1 # amount to scale intrinsic reward
