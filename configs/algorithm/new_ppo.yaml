@@ -19,6 +19,6 @@ entropy_target: 1.0
 vf_coef: 0.5  # coefficient of the value function
 max_grad_norm: 0.5  # the maximum norm for the gradient clipping
 target_kl: null  # the target KL divergence threshold
-iem_lr: 0.0002
+iem_lr: 0.00025
 alpha: 0.7 # exponent for scaling intrinsic reward
-beta: 0.0 # amount to scale intrinsic reward
+beta: 10.0 # amount to scale intrinsic reward

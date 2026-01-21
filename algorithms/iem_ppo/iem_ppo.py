@@ -282,7 +282,7 @@ class PPO(nn.Module):
 
         # Visitation tracking
         self.track_visitation = True
-        self.visitation_topk = 50
+        self.visitation_topk = 500
         self.visitation_csv_path = self.log_file.replace("train_log.csv", "visitation_topk.csv")
 
         # Running counters over the current log window
@@ -291,10 +291,29 @@ class PPO(nn.Module):
         self._visit_total_p0 = 0
         self._visit_total_p1 = 0
 
+        # --- B2: SimHash bucket visitation ---
+        self.visitation_use_simhash = True
+
+        # Number of bits in full SimHash signature (more bits = finer similarity)
+        self.simhash_bits = 64
+
+        # Number of prefix bits used as bucket id (grid size = 2^prefix_bits)
+        # 10 -> 1024 buckets, 12 -> 4096 buckets
+        self.simhash_prefix_bits = 14
+
+        # Make it deterministic across runs if you want reproducible bucket layouts
+        self.simhash_seed = 12345
+
+        # Pre-sample random hyperplanes for SimHash: [bits, D]
+        rng = np.random.default_rng(self.simhash_seed)
+        D = int(np.array(self.input_shape).prod())
+        self._simhash_planes = rng.standard_normal(size=(self.simhash_bits, D)).astype(np.float32)
+
+
         # Write CSV header once
         if self.track_visitation and not os.path.exists(self.visitation_csv_path):
             with open(self.visitation_csv_path, "w") as f:
-                f.write("steps,player,infoset_id,count\n")
+                f.write("steps,player,bucket_id,count\n")
 
         self.visitation_quantize = True
 
@@ -303,6 +322,32 @@ class PPO(nn.Module):
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
+    
+    def _simhash_bucket_id(self, x: np.ndarray) -> int:
+        """
+        SimHash bucket for an info_state vector x (shape [D]).
+        Returns an int in [0, 2^simhash_prefix_bits).
+        """
+        # Quantize same as your hashing path (optional but helps stability)
+        if self.visitation_quantize:
+            v = np.rint(x).astype(np.float32, copy=False)
+        else:
+            v = x.astype(np.float32, copy=False)
+
+        # Compute projections onto random hyperplanes
+        # shape: [simhash_bits]
+        proj = self._simhash_planes @ v
+
+        # Bits: 1 if proj >= 0 else 0
+        bits = (proj >= 0)
+
+        # Convert first prefix_bits into an integer bucket id
+        k = self.simhash_prefix_bits
+        bucket = 0
+        for i in range(k):
+            bucket = (bucket << 1) | int(bits[i])
+        return bucket
+
     
     def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
         """
@@ -471,12 +516,16 @@ class PPO(nn.Module):
             for i in range(B):
                 if not alive_np[i]:
                     continue
-                infoset_id = self._infoset_id_from_tensor(b_obs_np[i])
+                if self.visitation_use_simhash:
+                    key = self._simhash_bucket_id(b_obs_np[i])   # int bucket
+                else:
+                    key = self._infoset_id_from_tensor(b_obs_np[i])  # old hex hash
+
                 if b_players_np[i] == 0:
-                    self._visit_counter_p0[infoset_id] += 1
+                    self._visit_counter_p0[key] += 1
                     self._visit_total_p0 += 1
                 elif b_players_np[i] == 1:
-                    self._visit_counter_p1[infoset_id] += 1
+                    self._visit_counter_p1[key] += 1
                     self._visit_total_p1 += 1
 
         # iem logging
@@ -504,6 +553,8 @@ class PPO(nn.Module):
 
                     b_rint_raw[mask0] = r0
                     b_rint_raw_p0[mask0] = r0
+                    
+
 
                     tmp0 = torch.zeros_like(b_rint)
                     tmp0[mask0] = r0
@@ -515,6 +566,7 @@ class PPO(nn.Module):
                     #     tmp0[mask0] = 0.0
 
                     b_rint += self.beta * tmp0
+
 
                 mask1 = (b_players == 1) & alive
                 if mask1.any():
@@ -702,10 +754,10 @@ class PPO(nn.Module):
                 # Dump interval top-K to CSV (one row per state)
                 with open(self.visitation_csv_path, "a") as f:
                     step = int(self.total_steps_done)
-                    for infoset_id, cnt in self._visit_counter_p0.most_common(self.visitation_topk):
-                        f.write(f"{step},0,{infoset_id},{cnt}\n")
-                    for infoset_id, cnt in self._visit_counter_p1.most_common(self.visitation_topk):
-                        f.write(f"{step},1,{infoset_id},{cnt}\n")
+                    for bucket_id, cnt in self._visit_counter_p0.most_common(self.visitation_topk):
+                        f.write(f"{step},0,{bucket_id},{cnt}\n")
+                    for bucket_id, cnt in self._visit_counter_p1.most_common(self.visitation_topk):
+                        f.write(f"{step},1,{bucket_id},{cnt}\n")
 
                 # Reset interval counters for next 10k window
                 self._visit_counter_p0.clear()

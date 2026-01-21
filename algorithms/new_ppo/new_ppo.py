@@ -27,6 +27,10 @@ Currently only supports the single-agent case.
 
 import time
 
+import os
+import hashlib
+from collections import Counter
+
 import numpy as np
 import torch
 from torch import nn
@@ -283,11 +287,89 @@ class PPO(nn.Module):
         self.last_log_step = 0
         self.log_interval = 10000
 
+        # Visitation tracking
+        self.track_visitation = True
+        self.visitation_topk = 500
+        self.visitation_csv_path = self.log_file.replace("train_log.csv", "visitation_topk.csv")
+
+        # Running counters over the current log window
+        self._visit_counter_p0 = Counter()
+        self._visit_counter_p1 = Counter()
+        self._visit_total_p0 = 0
+        self._visit_total_p1 = 0
+
+        # --- B2: SimHash bucket visitation ---
+        self.visitation_use_simhash = True
+
+        # Number of bits in full SimHash signature (more bits = finer similarity)
+        self.simhash_bits = 64
+
+        # Number of prefix bits used as bucket id (grid size = 2^prefix_bits)
+        # 10 -> 1024 buckets, 12 -> 4096 buckets
+        self.simhash_prefix_bits = 14
+
+        # Make it deterministic across runs if you want reproducible bucket layouts
+        self.simhash_seed = 12345
+
+        # Pre-sample random hyperplanes for SimHash: [bits, D]
+        rng = np.random.default_rng(self.simhash_seed)
+        D = int(np.array(self.input_shape).prod())
+        self._simhash_planes = rng.standard_normal(size=(self.simhash_bits, D)).astype(np.float32)
+
+
+        # Write CSV header once
+        if self.track_visitation and not os.path.exists(self.visitation_csv_path):
+            with open(self.visitation_csv_path, "w") as f:
+                f.write("steps,player,bucket_id,count\n")
+
+        self.visitation_quantize = True
+
     def get_value(self, x):
         return self.network.get_value(x)
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
+
+    def _simhash_bucket_id(self, x: np.ndarray) -> int:
+        """
+        SimHash bucket for an info_state vector x (shape [D]).
+        Returns an int in [0, 2^simhash_prefix_bits).
+        """
+        # Quantize same as your hashing path (optional but helps stability)
+        if self.visitation_quantize:
+            v = np.rint(x).astype(np.float32, copy=False)
+        else:
+            v = x.astype(np.float32, copy=False)
+
+        # Compute projections onto random hyperplanes
+        # shape: [simhash_bits]
+        proj = self._simhash_planes @ v
+
+        # Bits: 1 if proj >= 0 else 0
+        bits = (proj >= 0)
+
+        # Convert first prefix_bits into an integer bucket id
+        k = self.simhash_prefix_bits
+        bucket = 0
+        for i in range(k):
+            bucket = (bucket << 1) | int(bits[i])
+        return bucket
+
+    
+    def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
+        """
+        Stable infoset identity from info_state tensor.
+        x: shape [D] numpy array (float or int)
+        Returns: short hex string id
+        """
+        if self.visitation_quantize:
+            # info_state in OpenSpiel is typically 0/1; quantize to int8 to avoid float noise
+            xb = np.rint(x).astype(np.int8, copy=False).tobytes()
+        else:
+            xb = x.astype(np.float32, copy=False).tobytes()
+
+        # fast, stable hash; 8 bytes digest is enough for logging
+        return hashlib.blake2b(xb, digest_size=8).hexdigest()
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -366,6 +448,29 @@ class PPO(nn.Module):
         b_players = self.current_players.reshape(-1)
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
+
+        # --- Visitation logging (accumulate over log_interval) ---
+        if self.track_visitation:
+            b_obs_np = b_obs.detach().cpu().numpy()  # [B, D]
+            b_players_np = b_players.detach().cpu().numpy().astype(np.int32)  # [B]
+            dones_np = self.dones.reshape(-1).detach().cpu().numpy()
+            alive_np = (dones_np == 0)  # True where not terminal/padding
+
+            # Update running counters for this batch
+            for i in range(B):
+                if not alive_np[i]:
+                    continue
+                if self.visitation_use_simhash:
+                    key = self._simhash_bucket_id(b_obs_np[i])   # int bucket
+                else:
+                    key = self._infoset_id_from_tensor(b_obs_np[i])  # old hex hash
+
+                if b_players_np[i] == 0:
+                    self._visit_counter_p0[key] += 1
+                    self._visit_total_p0 += 1
+                elif b_players_np[i] == 1:
+                    self._visit_counter_p1[key] += 1
+                    self._visit_total_p1 += 1
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
@@ -499,6 +604,57 @@ class PPO(nn.Module):
                 "steps": self.total_steps_done,
                 "avg_entropy": avg_entropy
             }
+
+            # Visitation logging (interval)
+            if self.track_visitation:
+                def _counter_stats(counter: Counter, total_visits: int):
+                    uniq = len(counter)
+                    if total_visits == 0 or uniq == 0:
+                        return dict(total=0, uniq=0, top10_share=0.0, entropy_norm=0.0)
+
+                    top10 = sum(v for _, v in counter.most_common(10))
+                    top10_share = top10 / total_visits
+
+                    ps = np.array(list(counter.values()), dtype=np.float64) / total_visits
+                    ent = float(-(ps * np.log(ps + 1e-12)).sum())
+
+                    # Avoid 0/0 when uniq==1
+                    if uniq <= 1:
+                        ent_norm = 0.0
+                    else:
+                        ent_norm = float(ent / np.log(uniq))
+
+                    return dict(total=total_visits, uniq=uniq, top10_share=float(top10_share), entropy_norm=float(ent_norm))
+
+                s0 = _counter_stats(self._visit_counter_p0, self._visit_total_p0)
+                s1 = _counter_stats(self._visit_counter_p1, self._visit_total_p1)
+
+                log_data.update({
+                    "visit_p0_interval_total": s0["total"],
+                    "visit_p0_interval_unique": s0["uniq"],
+                    "visit_p0_interval_top10_share": s0["top10_share"],
+                    "visit_p0_interval_entropy_norm": s0["entropy_norm"],
+
+                    "visit_p1_interval_total": s1["total"],
+                    "visit_p1_interval_unique": s1["uniq"],
+                    "visit_p1_interval_top10_share": s1["top10_share"],
+                    "visit_p1_interval_entropy_norm": s1["entropy_norm"],
+                })
+
+                # Dump interval top-K to CSV (one row per state)
+                with open(self.visitation_csv_path, "a") as f:
+                    step = int(self.total_steps_done)
+                    for bucket_id, cnt in self._visit_counter_p0.most_common(self.visitation_topk):
+                        f.write(f"{step},0,{bucket_id},{cnt}\n")
+                    for bucket_id, cnt in self._visit_counter_p1.most_common(self.visitation_topk):
+                        f.write(f"{step},1,{bucket_id},{cnt}\n")
+
+                # Reset interval counters for next 10k window
+                self._visit_counter_p0.clear()
+                self._visit_counter_p1.clear()
+                self._visit_total_p0 = 0
+                self._visit_total_p1 = 0
+
             
             # Use the utility to write to train_log.csv
             log_to_csv(log_data, self.log_file)
