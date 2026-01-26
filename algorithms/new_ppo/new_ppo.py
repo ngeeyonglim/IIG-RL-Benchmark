@@ -285,7 +285,7 @@ class PPO(nn.Module):
         self.accumulated_entropy = 0.0
         self.entropy_count = 0
         self.last_log_step = 0
-        self.log_interval = 10000
+        self.log_interval = 100000
 
         # Visitation tracking
         self.track_visitation = True
