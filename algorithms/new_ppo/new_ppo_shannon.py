@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of MEC-PPO with tsallis entropy
+"""An implementation of MEC-PPO.
 
 Merged Implementation: IEM-PPO with Minimum Entropy Constraint (MEC).
 Exploration: Uses IEM to add intrinsic rewards to advantages.
@@ -214,7 +214,6 @@ class PPO(nn.Module):
         beta=0.1,
         entropy_target=0.6,
         hinge_coef=1.0,
-        tsallis_q=2.0,
         **kwargs,
     ):
         super().__init__()
@@ -325,14 +324,6 @@ class PPO(nn.Module):
 
         self.visitation_quantize = True
 
-        self.tsallis_q = float(tsallis_q)
-        # hard guard against tsallis = 1
-        if abs(self.tsallis_q - 1.0) < 1e-8:
-            raise ValueError("tsallis_q must be != 1.0 (q=1 corresponds to Shannon entropy).")
-        
-        print("Using Tsallis PPO")
-
-
     def get_value(self, x):
         return self.network.get_value(x)
 
@@ -379,38 +370,6 @@ class PPO(nn.Module):
 
         # fast, stable hash; 8 bytes digest is enough for logging
         return hashlib.blake2b(xb, digest_size=8).hexdigest()
-    
-    def _tsallis_entropy_norm(self, probs: torch.Tensor, legal_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Normalized Tsallis entropy in [0, 1] for categorical policies with varying legal action counts.
-
-        probs:      [B, A] probabilities (from CategoricalMasked, already close to masked)
-        legal_mask: [B, A] bool
-
-        Returns:
-        ent_norm: [B] normalized Tsallis entropy
-        """
-        eps = 1e-12
-        q = self.tsallis_q
-
-        # Re-mask and renormalize to be safe (important when using probs.probs)
-        p = probs * legal_mask.to(probs.dtype)
-        p = p / (p.sum(dim=-1, keepdim=True) + eps)
-        p = torch.clamp(p, min=0.0, max=1.0)
-
-        # Tsallis entropy: H_q(p) = (1 - sum_i p_i^q) / (q - 1)
-        sum_pq = (p ** q).sum(dim=-1)              # [B]
-        Hq = (1.0 - sum_pq) / (q - 1.0)            # [B]
-
-        # Normalize by maximum Tsallis entropy for n legal actions:
-        # H_q^max(n) = (1 - n^(1-q)) / (q - 1)
-        n = legal_mask.sum(dim=-1).to(probs.dtype)  # [B]
-        n = torch.clamp(n, min=1.0)
-        Hq_max = (1.0 - n ** (1.0 - q)) / (q - 1.0)
-
-        ent_norm = Hq / (Hq_max + eps)
-        return torch.clamp(ent_norm, 0.0, 1.0)
-
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -435,7 +394,7 @@ class PPO(nn.Module):
                 ).to(self.device)
                 current_players = torch.Tensor([ts.current_player() for ts in time_step]).to(self.device)
 
-                action, logprob, _, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
+                action, logprob, entropy, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
 
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
@@ -443,12 +402,8 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
-                # self.accumulated_entropy += entropy.mean().item()
-                # self.entropy_count += 1
-                tsallis_ent = self._tsallis_entropy_norm(probs, legal_actions_mask)  # [num_envs]
-                self.accumulated_entropy += tsallis_ent.mean().item()
+                self.accumulated_entropy += entropy.mean().item()
                 self.entropy_count += 1
-
 
                 agent_output = [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
                 return agent_output
@@ -584,7 +539,7 @@ class PPO(nn.Module):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, _, newvalue, new_probs = self.get_action_and_value(
+                _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
@@ -617,8 +572,7 @@ class PPO(nn.Module):
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                tsallis_ent = self._tsallis_entropy_norm(new_probs, b_legal_actions_mask[mb_inds])  # [mb]
-                entropy_loss = tsallis_ent.mean()
+                entropy_loss = entropy.mean()
                 
                 # With Hinge Loss:
                 hinge_penalty = torch.clamp(
