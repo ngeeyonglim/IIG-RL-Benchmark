@@ -13,7 +13,7 @@ update_epochs: 4  # the K epochs to update the policy
 norm_adv: true  # Toggles advantages normalization
 clip_coef: 0.1  # the surrogate clipping coefficient
 clip_vloss: true  # Toggles whether or not to use a clipped loss for the value function, as per the paper
-ent_coef: 0.00  # coefficient of the entropy
+ent_coef: 0.2  # coefficient of the entropy
 vf_coef: 0.5  # coefficient of the value function
 max_grad_norm: 0.5  # the maximum norm for the gradient clipping
 target_kl: null  # the target KL divergence threshold

@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of PPO with IEM (intrinsic rewards).
+"""An implementation of MEC-PPO with tsallis entropy
+
+Merged Implementation: IEM-PPO with Minimum Entropy Constraint (MEC).
+Exploration: Uses IEM to add intrinsic rewards to advantages.
+Regularization: Uses MEC (Hinge Loss) to enforce a minimum entropy floor instead of maximizing it
 
 Note: code adapted (with permission) from
 https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py and
@@ -22,6 +26,10 @@ Currently only supports the single-agent case.
 """
 
 import time
+
+import os
+import hashlib
+from collections import Counter
 
 import numpy as np
 import torch
@@ -96,6 +104,7 @@ class PPOAgent(nn.Module):
         return (
             action,
             probs.log_prob(action),
+            probs.entropy(),
             self.critic(x),
             probs.probs,
         )
@@ -143,6 +152,7 @@ class PPOAtariAgent(nn.Module):
         return (
             action,
             probs.log_prob(action),
+            probs.entropy(),
             self.critic(hidden),
             probs.probs,
         )
@@ -169,9 +179,11 @@ def legal_actions_to_mask(legal_actions_list, num_actions):
 
 
 class PPO(nn.Module):
-    """A PPO class.
-
-    This class implements a PPO agent with IEM.
+    """
+    Merged Implementation: IEM-PPO with Minimum Entropy Constraint (MEC).
+    
+    1. Exploration: Uses IEM (Intrinsic Exploration Module) to add intrinsic rewards to advantages.
+    2. Regularization: Uses MEC (Hinge Loss) to enforce a minimum entropy floor instead of maximizing it.
     """
 
     def __init__(
@@ -190,7 +202,7 @@ class PPO(nn.Module):
         normalize_advantages=True,
         clip_coef=0.2,
         clip_vloss=True,
-        entropy_coef=0.01,
+        entropy_coef=0.00,
         value_coef=0.5,
         max_grad_norm=0.5,
         target_kl=None,
@@ -200,6 +212,8 @@ class PPO(nn.Module):
         iem_p0=None,
         iem_p1=None,
         beta=0.1,
+        entropy_target=0.6,
+        hinge_coef=1.0,
         tsallis_q=2.0,
         **kwargs,
     ):
@@ -228,13 +242,11 @@ class PPO(nn.Module):
         self.normalize_advantages = normalize_advantages
         self.clip_coef = clip_coef
         self.clip_vloss = clip_vloss
-        self.entropy_coef = entropy_coef
-        # Tsallis entropy configuration (q != 1). We will use normalized Tsallis entropy in [0, 1].
-        self.tsallis_q = float(tsallis_q)
-        if abs(self.tsallis_q - 1.0) < 1e-8:
-            raise ValueError(
-                "tsallis_q must be != 1.0 (q=1 corresponds to Shannon entropy)."
-            )
+        
+        # MEC Parameters
+        self.hinge_coef = hinge_coef
+        self.entropy_target = entropy_target
+        
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
@@ -270,11 +282,56 @@ class PPO(nn.Module):
         self.iem_p0 = iem_p0
         self.iem_p1 = iem_p1
 
-        # Init for entropy logging
+        # Init for entropy logging (1)
         self.accumulated_entropy = 0.0
         self.entropy_count = 0
         self.last_log_step = 0
         self.log_interval = 100000
+
+        # Visitation tracking
+        self.track_visitation = True
+        self.visitation_topk = 500
+        self.visitation_csv_path = self.log_file.replace("train_log.csv", "visitation_topk.csv")
+
+        # Running counters over the current log window
+        self._visit_counter_p0 = Counter()
+        self._visit_counter_p1 = Counter()
+        self._visit_total_p0 = 0
+        self._visit_total_p1 = 0
+
+        # --- B2: SimHash bucket visitation ---
+        self.visitation_use_simhash = True
+
+        # Number of bits in full SimHash signature (more bits = finer similarity)
+        self.simhash_bits = 64
+
+        # Number of prefix bits used as bucket id (grid size = 2^prefix_bits)
+        # 10 -> 1024 buckets, 12 -> 4096 buckets
+        self.simhash_prefix_bits = 14
+
+        # Make it deterministic across runs if you want reproducible bucket layouts
+        self.simhash_seed = 12345
+
+        # Pre-sample random hyperplanes for SimHash: [bits, D]
+        rng = np.random.default_rng(self.simhash_seed)
+        D = int(np.array(self.input_shape).prod())
+        self._simhash_planes = rng.standard_normal(size=(self.simhash_bits, D)).astype(np.float32)
+
+
+        # Write CSV header once
+        if self.track_visitation and not os.path.exists(self.visitation_csv_path):
+            with open(self.visitation_csv_path, "w") as f:
+                f.write("steps,player,bucket_id,count\n")
+
+        self.visitation_quantize = True
+
+        self.tsallis_q = float(tsallis_q)
+        # hard guard against tsallis = 1
+        if abs(self.tsallis_q - 1.0) < 1e-8:
+            raise ValueError("tsallis_q must be != 1.0 (q=1 corresponds to Shannon entropy).")
+        
+        print("Using Tsallis PPO")
+
 
     def get_value(self, x):
         return self.network.get_value(x)
@@ -282,183 +339,183 @@ class PPO(nn.Module):
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
 
+    def _simhash_bucket_id(self, x: np.ndarray) -> int:
+        """
+        SimHash bucket for an info_state vector x (shape [D]).
+        Returns an int in [0, 2^simhash_prefix_bits).
+        """
+        # Quantize same as your hashing path (optional but helps stability)
+        if self.visitation_quantize:
+            v = np.rint(x).astype(np.float32, copy=False)
+        else:
+            v = x.astype(np.float32, copy=False)
+
+        # Compute projections onto random hyperplanes
+        # shape: [simhash_bits]
+        proj = self._simhash_planes @ v
+
+        # Bits: 1 if proj >= 0 else 0
+        bits = (proj >= 0)
+
+        # Convert first prefix_bits into an integer bucket id
+        k = self.simhash_prefix_bits
+        bucket = 0
+        for i in range(k):
+            bucket = (bucket << 1) | int(bits[i])
+        return bucket
+
+    
+    def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
+        """
+        Stable infoset identity from info_state tensor.
+        x: shape [D] numpy array (float or int)
+        Returns: short hex string id
+        """
+        if self.visitation_quantize:
+            # info_state in OpenSpiel is typically 0/1; quantize to int8 to avoid float noise
+            xb = np.rint(x).astype(np.int8, copy=False).tobytes()
+        else:
+            xb = x.astype(np.float32, copy=False).tobytes()
+
+        # fast, stable hash; 8 bytes digest is enough for logging
+        return hashlib.blake2b(xb, digest_size=8).hexdigest()
+    
     def _tsallis_entropy_norm(self, probs: torch.Tensor, legal_mask: torch.Tensor) -> torch.Tensor:
         """
         Normalized Tsallis entropy in [0, 1] for categorical policies with varying legal action counts.
 
-        Args:
-            probs:      [B, A] probabilities (policy probabilities).
-            legal_mask: [B, A] bool mask of legal actions.
+        probs:      [B, A] probabilities (from CategoricalMasked, already close to masked)
+        legal_mask: [B, A] bool
 
         Returns:
-            ent_norm: [B] normalized Tsallis entropy.
+        ent_norm: [B] normalized Tsallis entropy
         """
         eps = 1e-12
         q = self.tsallis_q
 
-        # Mask and renormalize over legal actions for numerical safety.
+        # Re-mask and renormalize to be safe (important when using probs.probs)
         p = probs * legal_mask.to(probs.dtype)
         p = p / (p.sum(dim=-1, keepdim=True) + eps)
         p = torch.clamp(p, min=0.0, max=1.0)
 
         # Tsallis entropy: H_q(p) = (1 - sum_i p_i^q) / (q - 1)
-        sum_pq = (p ** q).sum(dim=-1)  # [B]
-        Hq = (1.0 - sum_pq) / (q - 1.0)
+        sum_pq = (p ** q).sum(dim=-1)              # [B]
+        Hq = (1.0 - sum_pq) / (q - 1.0)            # [B]
 
-        # Max Tsallis entropy for n legal actions:
+        # Normalize by maximum Tsallis entropy for n legal actions:
         # H_q^max(n) = (1 - n^(1-q)) / (q - 1)
-        n = legal_mask.sum(dim=-1).to(probs.dtype)
+        n = legal_mask.sum(dim=-1).to(probs.dtype)  # [B]
         n = torch.clamp(n, min=1.0)
         Hq_max = (1.0 - n ** (1.0 - q)) / (q - 1.0)
 
         ent_norm = Hq / (Hq_max + eps)
         return torch.clamp(ent_norm, 0.0, 1.0)
 
+
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
             with torch.no_grad():
                 legal_actions_mask = legal_actions_to_mask(
-                    [
-                        ts.observations["legal_actions"][ts.current_player()]
-                        for ts in time_step
-                    ],
+                    [ts.observations["legal_actions"][ts.current_player()] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
                 obs = torch.Tensor(
-                    np.array(
-                        [
-                            np.reshape(
-                                ts.observations["info_state"][ts.current_player()],
-                                self.input_shape,
-                            )
-                            for ts in time_step
-                        ]
-                    )
+                    np.array([np.reshape(ts.observations["info_state"][ts.current_player()], self.input_shape) for ts in time_step])
                 ).to(self.device)
-                action, _, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
-                )
-                return [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
-                ]
+                action, _, _, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
+                return [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
         else:
             with torch.no_grad():
-                # act
                 obs = torch.Tensor(
-                    np.array(
-                        [
-                            np.reshape(
-                                ts.observations["info_state"][ts.current_player()],
-                                self.input_shape,
-                            )
-                            for ts in time_step
-                        ]
-                    )
+                    np.array([np.reshape(ts.observations["info_state"][ts.current_player()], self.input_shape) for ts in time_step])
                 ).to(self.device)
                 legal_actions_mask = legal_actions_to_mask(
-                    [
-                        ts.observations["legal_actions"][ts.current_player()]
-                        for ts in time_step
-                    ],
+                    [ts.observations["legal_actions"][ts.current_player()] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
-                current_players = torch.Tensor(
-                    [ts.current_player() for ts in time_step]
-                ).to(self.device)
+                current_players = torch.Tensor([ts.current_player() for ts in time_step]).to(self.device)
 
-                action, logprob, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
-                )
+                action, logprob, _, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
 
-                # store
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
                 self.actions[self.cur_batch_idx] = action
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
+                # self.accumulated_entropy += entropy.mean().item()
+                # self.entropy_count += 1
                 tsallis_ent = self._tsallis_entropy_norm(probs, legal_actions_mask)  # [num_envs]
                 self.accumulated_entropy += tsallis_ent.mean().item()
                 self.entropy_count += 1
 
-                agent_output = [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
-                ]
+
+                agent_output = [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
                 return agent_output
 
     def post_step(self, reward, done):
         self.rewards[self.cur_batch_idx] = torch.tensor(reward).to(self.device).view(-1)
         self.dones[self.cur_batch_idx] = torch.tensor(done).to(self.device).view(-1)
-
         self.total_steps_done += self.num_envs
         self.cur_batch_idx += 1
 
     def learn(self, time_step):
+        # 1. Bootstrapping and Advantage Calculation (Unchanged)
         next_obs = torch.Tensor(
-            np.array(
-                [
-                    np.reshape(
-                        ts.observations["info_state"][ts.current_player()],
-                        self.input_shape,
-                    )
-                    for ts in time_step
-                ]
-            )
+            np.array([np.reshape(ts.observations["info_state"][ts.current_player()], self.input_shape) for ts in time_step])
         ).to(self.device)
 
-        
-
-        # bootstrap value if not done
         with torch.no_grad():
             next_value = self.get_value(next_obs).reshape(1, -1)
             if self.gae:
                 advantages = torch.zeros_like(self.rewards).to(self.device)
                 lastgaelam = 0
                 for t in reversed(range(self.steps_per_batch)):
-                    nextvalues = (
-                        next_value
-                        if t == self.steps_per_batch - 1
-                        else self.values[t + 1]
-                    )
+                    nextvalues = next_value if t == self.steps_per_batch - 1 else self.values[t + 1]
                     nextnonterminal = 1.0 - self.dones[t]
-                    delta = (
-                        self.rewards[t]
-                        + self.gamma * nextvalues * nextnonterminal
-                        - self.values[t]
-                    )
-                    advantages[t] = lastgaelam = (
-                        delta
-                        + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
-                    )
+                    delta = self.rewards[t] + self.gamma * nextvalues * nextnonterminal - self.values[t]
+                    advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
                 returns = advantages + self.values
             else:
                 returns = torch.zeros_like(self.rewards).to(self.device)
                 for t in reversed(range(self.steps_per_batch)):
-                    next_return = (
-                        next_value
-                        if t == self.steps_per_batch - 1
-                        else returns[t + 1]
-                    )
+                    next_return = next_value if t == self.steps_per_batch - 1 else returns[t + 1]
                     nextnonterminal = 1.0 - self.dones[t]
-                    returns[t] = (
-                        self.rewards[t] + self.gamma * nextnonterminal * next_return
-                    )
+                    returns[t] = self.rewards[t] + self.gamma * nextnonterminal * next_return
                 advantages = returns - self.values
 
         # flatten the batch
+        b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
         b_obs = self.obs.reshape((-1,) + self.input_shape)
         b_logprobs = self.logprobs.reshape(-1)
         b_actions = self.actions.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_players = self.current_players.reshape(-1)
-        b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
-        b_returns = returns.reshape(-1)
-        b_values = self.values.reshape(-1)
-
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
+
+        # --- Visitation logging (accumulate over log_interval) ---
+        if self.track_visitation:
+            b_obs_np = b_obs.detach().cpu().numpy()  # [B, D]
+            b_players_np = b_players.detach().cpu().numpy().astype(np.int32)  # [B]
+            dones_np = self.dones.reshape(-1).detach().cpu().numpy()
+            alive_np = (dones_np == 0)  # True where not terminal/padding
+
+            # Update running counters for this batch
+            for i in range(B):
+                if not alive_np[i]:
+                    continue
+                if self.visitation_use_simhash:
+                    key = self._simhash_bucket_id(b_obs_np[i])   # int bucket
+                else:
+                    key = self._infoset_id_from_tensor(b_obs_np[i])  # old hex hash
+
+                if b_players_np[i] == 0:
+                    self._visit_counter_p0[key] += 1
+                    self._visit_total_p0 += 1
+                elif b_players_np[i] == 1:
+                    self._visit_counter_p1[key] += 1
+                    self._visit_total_p1 += 1
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
@@ -467,11 +524,11 @@ class PPO(nn.Module):
             alive = (b_dones == 0)
             mask0 = (b_players == 0) & alive
             if mask0.any():
-                self.iem_p0.update(b_obs_full[mask0])   # trains predictor + increments counts
+                _i1 = self.iem_p0.update(b_obs_full[mask0])   # trains predictor + increments counts
 
             mask1 = (b_players == 1) & alive
             if mask1.any():
-                self.iem_p1.update(b_obs_full[mask1])
+                _i2 = self.iem_p1.update(b_obs_full[mask1])
 
             with torch.no_grad():
                 mask0 = (b_players == 0) & alive
@@ -479,6 +536,13 @@ class PPO(nn.Module):
                     r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
                     tmp0 = torch.zeros_like(b_rint)
                     tmp0[mask0] = r0
+
+                    vals0 = tmp0[mask0]
+                    # if vals0.numel() > 1:
+                    #     tmp0[mask0] = (vals0 - vals0.mean()) / (vals0.std() + 1e-8)
+                    # else:
+                    #     tmp0[mask0] = 0.0
+
                     b_rint += self.beta * tmp0
 
                 mask1 = (b_players == 1) & alive
@@ -486,21 +550,32 @@ class PPO(nn.Module):
                     r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])  # [#mask1]
                     tmp1 = torch.zeros_like(b_rint)
                     tmp1[mask1] = r1
-                    b_rint += self.beta * tmp1
 
+                    vals1 = tmp1[mask1]
+                    # if vals1.numel() > 1:
+                    #     tmp1[mask1] = (vals1 - vals1.mean()) / (vals1.std() + 1e-8)
+                    # else:
+                    #     tmp1[mask1] = 0.0
+
+                    b_rint += self.beta * tmp1
+                
                 assert mask0.sum() > 0
                 assert mask1.sum() > 0
                 assert mask0.sum() + mask1.sum() == alive.sum()
+                # print(_i1, _i2)
+                
+
         else:
             raise ValueError("IEM modules not initialized in PPO")
 
+        b_returns = returns.reshape(-1)
+        b_values = self.values.reshape(-1)
         b_playersigns = -2.0 * b_players + 1.0   # +1 for p0, -1 for p1
         b_advantages_ext = b_advantages          # keep a pure extrinsic copy
         b_advantages = b_advantages_ext * b_playersigns
         b_advantages = b_advantages + b_rint # if iem reward not normalized
 
-
-        # Optimizing the policy and value network
+        # MEC (Hinge Loss)
         b_inds = np.arange(self.batch_size)
         clipfracs = []
         for _ in range(self.update_epochs):
@@ -509,7 +584,7 @@ class PPO(nn.Module):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, newvalue, new_probs = self.get_action_and_value(
+                _, newlogprob, _, newvalue, new_probs = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
@@ -518,36 +593,24 @@ class PPO(nn.Module):
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [
-                        ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-                    ]
+                    clipfracs += [((ratio - 1.0).abs() > self.clip_coef).float().mean().item()]
 
-                
                 mb_advantages = b_advantages[mb_inds]
                 if self.normalize_advantages:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
-                        mb_advantages.std() + 1e-8
-                    )
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                )
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
                 if self.clip_vloss:
                     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -self.clip_coef,
-                        self.clip_coef,
-                    )
+                    v_clipped = b_values[mb_inds] + torch.clamp(newvalue - b_values[mb_inds], -self.clip_coef, self.clip_coef)
                     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
@@ -556,11 +619,14 @@ class PPO(nn.Module):
 
                 tsallis_ent = self._tsallis_entropy_norm(new_probs, b_legal_actions_mask[mb_inds])  # [mb]
                 entropy_loss = tsallis_ent.mean()
-                loss = (
-                    pg_loss
-                    - self.entropy_coef * entropy_loss
-                    + v_loss * self.value_coef
+                
+                # With Hinge Loss:
+                hinge_penalty = torch.clamp(
+                    self.entropy_target - entropy_loss,
+                    min=0.0
                 )
+                
+                loss = pg_loss + v_loss * self.value_coef + self.hinge_coef * hinge_penalty
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -575,14 +641,66 @@ class PPO(nn.Module):
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
+
         # Check if 10,000 steps have passed since the last log
         if self.total_steps_done - self.last_log_step >= self.log_interval:
             avg_entropy = self.accumulated_entropy / self.entropy_count
             
             log_data = {
                 "steps": self.total_steps_done,
-                "avg_entropy": avg_entropy,
+                "avg_entropy": avg_entropy
             }
+
+            # Visitation logging (interval)
+            if self.track_visitation:
+                def _counter_stats(counter: Counter, total_visits: int):
+                    uniq = len(counter)
+                    if total_visits == 0 or uniq == 0:
+                        return dict(total=0, uniq=0, top10_share=0.0, entropy_norm=0.0)
+
+                    top10 = sum(v for _, v in counter.most_common(10))
+                    top10_share = top10 / total_visits
+
+                    ps = np.array(list(counter.values()), dtype=np.float64) / total_visits
+                    ent = float(-(ps * np.log(ps + 1e-12)).sum())
+
+                    # Avoid 0/0 when uniq==1
+                    if uniq <= 1:
+                        ent_norm = 0.0
+                    else:
+                        ent_norm = float(ent / np.log(uniq))
+
+                    return dict(total=total_visits, uniq=uniq, top10_share=float(top10_share), entropy_norm=float(ent_norm))
+
+                s0 = _counter_stats(self._visit_counter_p0, self._visit_total_p0)
+                s1 = _counter_stats(self._visit_counter_p1, self._visit_total_p1)
+
+                log_data.update({
+                    "visit_p0_interval_total": s0["total"],
+                    "visit_p0_interval_unique": s0["uniq"],
+                    "visit_p0_interval_top10_share": s0["top10_share"],
+                    "visit_p0_interval_entropy_norm": s0["entropy_norm"],
+
+                    "visit_p1_interval_total": s1["total"],
+                    "visit_p1_interval_unique": s1["uniq"],
+                    "visit_p1_interval_top10_share": s1["top10_share"],
+                    "visit_p1_interval_entropy_norm": s1["entropy_norm"],
+                })
+
+                # Dump interval top-K to CSV (one row per state)
+                with open(self.visitation_csv_path, "a") as f:
+                    step = int(self.total_steps_done)
+                    for bucket_id, cnt in self._visit_counter_p0.most_common(self.visitation_topk):
+                        f.write(f"{step},0,{bucket_id},{cnt}\n")
+                    for bucket_id, cnt in self._visit_counter_p1.most_common(self.visitation_topk):
+                        f.write(f"{step},1,{bucket_id},{cnt}\n")
+
+                # Reset interval counters for next 10k window
+                self._visit_counter_p0.clear()
+                self._visit_counter_p1.clear()
+                self._visit_total_p0 = 0
+                self._visit_total_p1 = 0
+
             
             # Use the utility to write to train_log.csv
             log_to_csv(log_data, self.log_file)
@@ -591,9 +709,12 @@ class PPO(nn.Module):
             self.accumulated_entropy = 0.0
             self.entropy_count = 0
             self.last_log_step = self.total_steps_done
+
         
         self.updates_done += 1
         self.cur_batch_idx = 0
+
+        
 
     def save(self, path):
         torch.save(self.network.actor.state_dict(), path)

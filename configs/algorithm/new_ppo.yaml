@@ -14,12 +14,12 @@ norm_adv: true  # Toggles advantages normalization
 clip_coef: 0.1  # the surrogate clipping coefficient
 clip_vloss: true  # Toggles whether or not to use a clipped loss for the value function, as per the paper
 # ent_coef: 0.00  # coefficient of the entropy
-hinge_coef: 0.5
-entropy_target: 0.6
+hinge_coef: 1.0
+entropy_target: 0.2
 vf_coef: 0.5  # coefficient of the value function
 max_grad_norm: 0.5  # the maximum norm for the gradient clipping
 target_kl: null  # the target KL divergence threshold
 iem_lr: 0.00025
-alpha: 0.6 # exponent for scaling intrinsic reward
+alpha: 0.6 # exponent for scaling intrinsic reward (0.6 (0.7? with aggressive decay) for 3 million, 0.4 for 5 million)
 beta: 10.0 # amount to scale intrinsic reward
 tsallis_q: 2.0
