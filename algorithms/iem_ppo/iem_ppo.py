@@ -22,6 +22,9 @@ Currently only supports the single-agent case.
 """
 
 import time
+import os
+import hashlib
+from collections import Counter
 
 import numpy as np
 import torch
@@ -278,13 +281,102 @@ class PPO(nn.Module):
         self.last_log_step = 0
         self.log_interval = 100000
 
+        # ----------------------------
+        # Visitation tracking (ported)
+        # ----------------------------
+        self.track_visitation = True
+        self.visitation_topk = 500
+
+        # Only enable file logging if we have a log_file path
+        if self.log_file is None:
+            self.track_visitation = False
+            self.visitation_csv_path = None
+        else:
+            self.visitation_csv_path = self.log_file.replace(
+                "train_log.csv", "visitation_topk.csv"
+            )
+
+        # Running counters over the current log window
+        self._visit_counter_p0 = Counter()
+        self._visit_counter_p1 = Counter()
+        self._visit_total_p0 = 0
+        self._visit_total_p1 = 0
+
+        # --- B2: SimHash bucket visitation ---
+        self.visitation_use_simhash = True
+
+        # Number of bits in full SimHash signature (more bits = finer similarity)
+        self.simhash_bits = 64
+
+        # Number of prefix bits used as bucket id (grid size = 2^prefix_bits)
+        # 10 -> 1024 buckets, 12 -> 4096 buckets
+        self.simhash_prefix_bits = 14
+
+        # Make it deterministic across runs if you want reproducible bucket layouts
+        self.simhash_seed = 12345
+
+        # Pre-sample random hyperplanes for SimHash: [bits, D]
+        rng = np.random.default_rng(self.simhash_seed)
+        D = int(np.array(self.input_shape).prod())
+        self._simhash_planes = rng.standard_normal(size=(self.simhash_bits, D)).astype(
+            np.float32
+        )
+
+        # Write CSV header once
+        if (
+            self.track_visitation
+            and (self.visitation_csv_path is not None)
+            and (not os.path.exists(self.visitation_csv_path))
+        ):
+            with open(self.visitation_csv_path, "w") as f:
+                f.write("steps,player,bucket_id,count\n")
+
+        self.visitation_quantize = True
+
     def get_value(self, x):
         return self.network.get_value(x)
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         return self.network.get_action_and_value(x, legal_actions_mask, action)
 
-    def _tsallis_entropy_norm(self, probs: torch.Tensor, legal_mask: torch.Tensor) -> torch.Tensor:
+    # ----------------------------
+    # Visitation helpers (ported)
+    # ----------------------------
+    def _simhash_bucket_id(self, x: np.ndarray) -> int:
+        """
+        SimHash bucket for an info_state vector x (shape [D]).
+        Returns an int in [0, 2^simhash_prefix_bits).
+        """
+        if self.visitation_quantize:
+            v = np.rint(x).astype(np.float32, copy=False)
+        else:
+            v = x.astype(np.float32, copy=False)
+
+        proj = self._simhash_planes @ v
+        bits = (proj >= 0)
+
+        k = self.simhash_prefix_bits
+        bucket = 0
+        for i in range(k):
+            bucket = (bucket << 1) | int(bits[i])
+        return bucket
+
+    def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
+        """
+        Stable infoset identity from info_state tensor.
+        x: shape [D] numpy array (float or int)
+        Returns: short hex string id
+        """
+        if self.visitation_quantize:
+            xb = np.rint(x).astype(np.int8, copy=False).tobytes()
+        else:
+            xb = x.astype(np.float32, copy=False).tobytes()
+
+        return hashlib.blake2b(xb, digest_size=8).hexdigest()
+
+    def _tsallis_entropy_norm(
+        self, probs: torch.Tensor, legal_mask: torch.Tensor
+    ) -> torch.Tensor:
         """
         Normalized Tsallis entropy in [0, 1] for categorical policies with varying legal action counts.
 
@@ -298,17 +390,13 @@ class PPO(nn.Module):
         eps = 1e-12
         q = self.tsallis_q
 
-        # Mask and renormalize over legal actions for numerical safety.
         p = probs * legal_mask.to(probs.dtype)
         p = p / (p.sum(dim=-1, keepdim=True) + eps)
         p = torch.clamp(p, min=0.0, max=1.0)
 
-        # Tsallis entropy: H_q(p) = (1 - sum_i p_i^q) / (q - 1)
-        sum_pq = (p ** q).sum(dim=-1)  # [B]
+        sum_pq = (p**q).sum(dim=-1)  # [B]
         Hq = (1.0 - sum_pq) / (q - 1.0)
 
-        # Max Tsallis entropy for n legal actions:
-        # H_q^max(n) = (1 - n^(1-q)) / (q - 1)
         n = legal_mask.sum(dim=-1).to(probs.dtype)
         n = torch.clamp(n, min=1.0)
         Hq_max = (1.0 - n ** (1.0 - q)) / (q - 1.0)
@@ -341,12 +429,10 @@ class PPO(nn.Module):
                     obs, legal_actions_mask=legal_actions_mask
                 )
                 return [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
+                    StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)
                 ]
         else:
             with torch.no_grad():
-                # act
                 obs = torch.Tensor(
                     np.array(
                         [
@@ -373,20 +459,21 @@ class PPO(nn.Module):
                     obs, legal_actions_mask=legal_actions_mask
                 )
 
-                # store
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
                 self.actions[self.cur_batch_idx] = action
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
-                tsallis_ent = self._tsallis_entropy_norm(probs, legal_actions_mask)  # [num_envs]
+
+                tsallis_ent = self._tsallis_entropy_norm(
+                    probs, legal_actions_mask
+                )  # [num_envs]
                 self.accumulated_entropy += tsallis_ent.mean().item()
                 self.entropy_count += 1
 
                 agent_output = [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
+                    StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)
                 ]
                 return agent_output
 
@@ -409,8 +496,6 @@ class PPO(nn.Module):
                 ]
             )
         ).to(self.device)
-
-        
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -444,9 +529,7 @@ class PPO(nn.Module):
                         else returns[t + 1]
                     )
                     nextnonterminal = 1.0 - self.dones[t]
-                    returns[t] = (
-                        self.rewards[t] + self.gamma * nextnonterminal * next_return
-                    )
+                    returns[t] = self.rewards[t] + self.gamma * nextnonterminal * next_return
                 advantages = returns - self.values
 
         # flatten the batch
@@ -462,14 +545,39 @@ class PPO(nn.Module):
         B = b_advantages.shape[0]
         b_rint = torch.zeros(B, device=self.device)
 
+        # ----------------------------------------
+        # Visitation logging (accumulate per window)
+        # ----------------------------------------
+        if self.track_visitation:
+            b_obs_np = b_obs.detach().cpu().numpy()  # [B, D]
+            b_players_np = b_players.detach().cpu().numpy().astype(np.int32)  # [B]
+            dones_np = self.dones.reshape(-1).detach().cpu().numpy()
+            alive_np = (dones_np == 0)
+
+            for i in range(B):
+                if not alive_np[i]:
+                    continue
+
+                if self.visitation_use_simhash:
+                    key = self._simhash_bucket_id(b_obs_np[i])  # int bucket
+                else:
+                    key = self._infoset_id_from_tensor(b_obs_np[i])  # hex hash
+
+                if b_players_np[i] == 0:
+                    self._visit_counter_p0[key] += 1
+                    self._visit_total_p0 += 1
+                elif b_players_np[i] == 1:
+                    self._visit_counter_p1[key] += 1
+                    self._visit_total_p1 += 1
+
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
             b_dones = self.dones.reshape(-1)
 
-            alive = (b_dones == 0)
+            alive = b_dones == 0
             mask0 = (b_players == 0) & alive
             if mask0.any():
-                self.iem_p0.update(b_obs_full[mask0])   # trains predictor + increments counts
+                self.iem_p0.update(b_obs_full[mask0])
 
             mask1 = (b_players == 1) & alive
             if mask1.any():
@@ -478,14 +586,14 @@ class PPO(nn.Module):
             with torch.no_grad():
                 mask0 = (b_players == 0) & alive
                 if mask0.any():
-                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
+                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])
                     tmp0 = torch.zeros_like(b_rint)
                     tmp0[mask0] = r0
                     b_rint += self.beta * tmp0
 
                 mask1 = (b_players == 1) & alive
                 if mask1.any():
-                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])  # [#mask1]
+                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])
                     tmp1 = torch.zeros_like(b_rint)
                     tmp1[mask1] = r1
                     b_rint += self.beta * tmp1
@@ -496,11 +604,10 @@ class PPO(nn.Module):
         else:
             raise ValueError("IEM modules not initialized in PPO")
 
-        b_playersigns = -2.0 * b_players + 1.0   # +1 for p0, -1 for p1
-        b_advantages_ext = b_advantages          # keep a pure extrinsic copy
+        b_playersigns = -2.0 * b_players + 1.0  # +1 for p0, -1 for p1
+        b_advantages_ext = b_advantages
         b_advantages = b_advantages_ext * b_playersigns
-        b_advantages = b_advantages + b_rint # if iem reward not normalized
-
+        b_advantages = b_advantages + b_rint
 
         # Optimizing the policy and value network
         b_inds = np.arange(self.batch_size)
@@ -520,14 +627,12 @@ class PPO(nn.Module):
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfracs += [
                         ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
                     ]
 
-                
                 mb_advantages = b_advantages[mb_inds]
                 if self.normalize_advantages:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (
@@ -556,13 +661,12 @@ class PPO(nn.Module):
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                tsallis_ent = self._tsallis_entropy_norm(new_probs, b_legal_actions_mask[mb_inds])  # [mb]
-                entropy_loss = tsallis_ent.mean()
-                loss = (
-                    pg_loss
-                    - self.entropy_coef * entropy_loss
-                    + v_loss * self.value_coef
+                tsallis_ent = self._tsallis_entropy_norm(
+                    new_probs, b_legal_actions_mask[mb_inds]
                 )
+                entropy_loss = tsallis_ent.mean()
+
+                loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -577,23 +681,90 @@ class PPO(nn.Module):
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # Check if 10,000 steps have passed since the last log
+        # Log every log_interval
         if self.total_steps_done - self.last_log_step >= self.log_interval:
-            avg_entropy = self.accumulated_entropy / self.entropy_count
-            
+            avg_entropy = self.accumulated_entropy / max(1, self.entropy_count)
+
             log_data = {
                 "steps": self.total_steps_done,
                 "avg_entropy": avg_entropy,
             }
-            
-            # Use the utility to write to train_log.csv
+
+            # ----------------------------
+            # Visitation interval summary + dump (ported)
+            # ----------------------------
+            if self.track_visitation:
+
+                def _counter_stats(counter: Counter, total_visits: int):
+                    uniq = len(counter)
+                    if total_visits <= 0 or uniq == 0:
+                        return dict(total=0, uniq=0, top10_share=0.0, entropy_norm=0.0)
+
+                    # top10 share
+                    top10 = counter.most_common(10)
+                    top10_sum = sum(cnt for _, cnt in top10)
+                    top10_share = top10_sum / float(total_visits)
+
+                    # normalized entropy of visitation distribution over unique keys
+                    # H(p)/log(|S|)
+                    probs = np.array([c for _, c in counter.items()], dtype=np.float64)
+                    probs = probs / probs.sum()
+                    ent = -np.sum(probs * np.log(probs + 1e-12))
+                    if uniq <= 1:
+                        ent_norm = 0.0
+                    else:
+                        ent_norm = float(ent / np.log(uniq))
+
+                    return dict(
+                        total=int(total_visits),
+                        uniq=int(uniq),
+                        top10_share=float(top10_share),
+                        entropy_norm=float(ent_norm),
+                    )
+
+                s0 = _counter_stats(self._visit_counter_p0, self._visit_total_p0)
+                s1 = _counter_stats(self._visit_counter_p1, self._visit_total_p1)
+
+                log_data.update(
+                    {
+                        "visit_p0_interval_total": s0["total"],
+                        "visit_p0_interval_unique": s0["uniq"],
+                        "visit_p0_interval_top10_share": s0["top10_share"],
+                        "visit_p0_interval_entropy_norm": s0["entropy_norm"],
+                        "visit_p1_interval_total": s1["total"],
+                        "visit_p1_interval_unique": s1["uniq"],
+                        "visit_p1_interval_top10_share": s1["top10_share"],
+                        "visit_p1_interval_entropy_norm": s1["entropy_norm"],
+                    }
+                )
+
+                # Dump interval top-K to CSV (one row per state/bucket)
+                if self.visitation_csv_path is not None:
+                    with open(self.visitation_csv_path, "a") as f:
+                        step = int(self.total_steps_done)
+                        for bucket_id, cnt in self._visit_counter_p0.most_common(
+                            self.visitation_topk
+                        ):
+                            f.write(f"{step},0,{bucket_id},{cnt}\n")
+                        for bucket_id, cnt in self._visit_counter_p1.most_common(
+                            self.visitation_topk
+                        ):
+                            f.write(f"{step},1,{bucket_id},{cnt}\n")
+
+                # Reset interval counters
+                self._visit_counter_p0.clear()
+                self._visit_counter_p1.clear()
+                self._visit_total_p0 = 0
+                self._visit_total_p1 = 0
+
+            # write to train_log.csv
             log_to_csv(log_data, self.log_file)
-            
+
             # Reset trackers for the next interval
             self.accumulated_entropy = 0.0
             self.entropy_count = 0
             self.last_log_step = self.total_steps_done
-        
+
         self.updates_done += 1
         self.cur_batch_idx = 0
 
