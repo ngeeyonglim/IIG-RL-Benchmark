@@ -1,7 +1,7 @@
 algorithm_name: iem_ppo  # Name of the algorithm
 learning_rate: 0.00025  # the learning rate of the optimizer
-eval_every: 10  # evaluate the policy every N updates
-cuda: false  # if toggled, cuda will be enabled by default
+eval_every: 100  # evaluate the policy every N updates
+cuda: true  # if toggled, cuda will be enabled by default
 num_envs: 8  # the number of parallel game environments
 num_steps: 128  # the number of steps to run in each environment per policy rollout (batch size is num_steps * num_envs)
 anneal_lr: true  # Toggle learning rate annealing for policy and value networks
@@ -17,6 +17,6 @@ ent_coef: 0.2  # coefficient of the entropy
 vf_coef: 0.5  # coefficient of the value function
 max_grad_norm: 0.5  # the maximum norm for the gradient clipping
 target_kl: null  # the target KL divergence threshold
-iem_lr: 0.00025
-alpha: 0.6 # exponent for scaling intrinsic reward
-beta: 10.0 # amount to scale intrinsic reward
+iem_lr: 0.0005
+alpha: 0.7  # exponent for scaling intrinsic reward 1 / n^alpha
+beta: 1.0 # amount to scale intrinsic reward

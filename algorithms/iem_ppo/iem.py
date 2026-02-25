@@ -39,11 +39,12 @@ https://arxiv.org/abs/1611.04717
 #         return torch.tensor(out, dtype=torch.float32, device=obs.device)
     
 class CountHasher:
-    def __init__(self, nbins=256, decay=0.95):
+    def __init__(self, nbins=256, decay=1):
         """
         decay: per-step decay factor lambda in (0,1]. 
                1.0 means no decay (original behavior).
         """
+        print(decay, "decay value for count hasher")
         self.nbins = nbins
         self.decay = float(decay)
 
