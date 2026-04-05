@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of PPO with IEM with TSallis entropy regularization.
+"""An implementation of PPO with IEM with Shannon entropy regularization.
 
 Note: code adapted (with permission) from
 https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py and
@@ -99,6 +99,7 @@ class PPOAgent(nn.Module):
         return (
             action,
             probs.log_prob(action),
+            probs.entropy(),
             self.critic(x),
             probs.probs,
         )
@@ -146,6 +147,7 @@ class PPOAtariAgent(nn.Module):
         return (
             action,
             probs.log_prob(action),
+            probs.entropy(),
             self.critic(hidden),
             probs.probs,
         )
@@ -202,13 +204,12 @@ class PPO(nn.Module):
         log_file=None,
         iem_p0=None,
         iem_p1=None,
-        beta=0.1,
-        tsallis_q=2.0,
+        beta=0.1,        
         **kwargs,
     ):
         super().__init__()
 
-        print("Using Tsallis-PPO with IEM")
+        print("Using PPO with IEM (Shannon entropy)")
 
         self.input_shape = (np.array(input_shape).prod(),)
         self.num_actions = num_actions
@@ -234,18 +235,11 @@ class PPO(nn.Module):
         self.clip_coef = clip_coef
         self.clip_vloss = clip_vloss
         self.entropy_coef = entropy_coef
-        # Tsallis entropy configuration (q != 1). We will use normalized Tsallis entropy in [0, 1].
-        self.tsallis_q = float(tsallis_q)
-        if abs(self.tsallis_q - 1.0) < 1e-8:
-            raise ValueError(
-                "tsallis_q must be != 1.0 (q=1 corresponds to Shannon entropy)."
-            )
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
+        self.initial_beta = beta
         self.beta = beta
-        print(f"Tsallis q: {self.tsallis_q}, beta: {self.beta}")
-
         # Initialize networks
         self.network = agent_fn(self.num_actions, self.input_shape, device).to(device)
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
@@ -386,36 +380,6 @@ class PPO(nn.Module):
 
         return hashlib.blake2b(xb, digest_size=8).hexdigest()
 
-    def _tsallis_entropy_norm(
-        self, probs: torch.Tensor, legal_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Normalized Tsallis entropy in [0, 1] for categorical policies with varying legal action counts.
-
-        Args:
-            probs:      [B, A] probabilities (policy probabilities).
-            legal_mask: [B, A] bool mask of legal actions.
-
-        Returns:
-            ent_norm: [B] normalized Tsallis entropy.
-        """
-        eps = 1e-12
-        q = self.tsallis_q
-
-        p = probs * legal_mask.to(probs.dtype)
-        p = p / (p.sum(dim=-1, keepdim=True) + eps)
-        p = torch.clamp(p, min=0.0, max=1.0)
-
-        sum_pq = (p**q).sum(dim=-1)  # [B]
-        Hq = (1.0 - sum_pq) / (q - 1.0)
-
-        n = legal_mask.sum(dim=-1).to(probs.dtype)
-        n = torch.clamp(n, min=1.0)
-        Hq_max = (1.0 - n ** (1.0 - q)) / (q - 1.0)
-
-        ent_norm = Hq / (Hq_max + eps)
-        return torch.clamp(ent_norm, 0.0, 1.0)
-
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
             with torch.no_grad():
@@ -426,7 +390,7 @@ class PPO(nn.Module):
                     ],
                     self.num_actions,
                 ).to(self.device)
-                obs = torch.Tensor(
+                obs = torch.as_tensor(
                     np.array(
                         [
                             np.reshape(
@@ -434,10 +398,12 @@ class PPO(nn.Module):
                                 self.input_shape,
                             )
                             for ts in time_step
-                        ]
-                    )
-                ).to(self.device)
-                action, _, value, probs = self.get_action_and_value(
+                        ],
+                        dtype=np.float32,
+                    ),
+                    device=self.device,
+                )
+                action, _, _, value, probs = self.get_action_and_value(
                     obs, legal_actions_mask=legal_actions_mask
                 )
                 return [
@@ -463,11 +429,13 @@ class PPO(nn.Module):
                     ],
                     self.num_actions,
                 ).to(self.device)
-                current_players = torch.Tensor(
-                    [ts.current_player() for ts in time_step]
-                ).to(self.device)
+                current_players = torch.as_tensor(
+                    [ts.current_player() for ts in time_step],
+                    device=self.device,
+                    dtype=torch.int64,
+                )
 
-                action, logprob, value, probs = self.get_action_and_value(
+                action, logprob, entropy, value, probs = self.get_action_and_value(
                     obs, legal_actions_mask=legal_actions_mask
                 )
 
@@ -477,11 +445,7 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
-
-                tsallis_ent = self._tsallis_entropy_norm(
-                    probs, legal_actions_mask
-                )  # [num_envs]
-                self.accumulated_entropy += tsallis_ent.mean().item()
+                self.accumulated_entropy += entropy.mean().item()
                 self.entropy_count += 1
 
                 agent_output = [
@@ -549,7 +513,7 @@ class PPO(nn.Module):
         b_logprobs = self.logprobs.reshape(-1)
         b_actions = self.actions.reshape(-1)
         b_advantages = advantages.reshape(-1)
-        b_players = self.current_players.reshape(-1)
+        b_players = self.current_players.reshape(-1).to(self.device)
         b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
         b_returns = returns.reshape(-1)
         b_values = self.values.reshape(-1)
@@ -584,22 +548,23 @@ class PPO(nn.Module):
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
-            b_dones = self.dones.reshape(-1)
+            b_dones = self.dones.reshape(-1).to(self.device)  # [B]
 
             alive = b_dones == 0
-            mask0 = (b_players == 0) & alive
+            mask0 = ((b_players == 0) & alive).to(self.device)
             if mask0.any():
                 self.iem_p0.update(b_obs_full[mask0])
 
-            mask1 = (b_players == 1) & alive
+            mask1 = ((b_players == 1) & alive).to(self.device)
             if mask1.any():
                 self.iem_p1.update(b_obs_full[mask1])
 
             with torch.no_grad():
                 mask0 = (b_players == 0) & alive
                 if mask0.any():
-                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])
+                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0]).to(self.device)
                     tmp0 = torch.zeros_like(b_rint)
+                    # print(tmp0.device, mask0.device, r0.device, b_players.device, b_dones.device)
                     tmp0[mask0] = r0
                     b_rint += self.beta * tmp0
                     # average b_rint
@@ -612,7 +577,7 @@ class PPO(nn.Module):
 
                 mask1 = (b_players == 1) & alive
                 if mask1.any():
-                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])
+                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1]).to(self.device)
                     tmp1 = torch.zeros_like(b_rint)
                     tmp1[mask1] = r1
                     b_rint += self.beta * tmp1
@@ -642,7 +607,7 @@ class PPO(nn.Module):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, newvalue, new_probs = self.get_action_and_value(
+                _, newlogprob, entropy, newvalue, new_probs = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
@@ -684,11 +649,7 @@ class PPO(nn.Module):
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
-
-                tsallis_ent = self._tsallis_entropy_norm(
-                    new_probs, b_legal_actions_mask[mb_inds]
-                )
-                entropy_loss = tsallis_ent.mean()
+                entropy_loss = entropy.mean()
 
                 loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
 
@@ -814,8 +775,10 @@ class PPO(nn.Module):
         self.network.actor.load_state_dict(torch.load(path))
 
     def anneal_learning_rate(self, update, num_total_updates):
-        frac = max(0, 1.0 - (update / num_total_updates))
+        frac = max(0.0, 1.0 - (update / num_total_updates))
         if frac < 0:
             raise ValueError("Annealing learning rate to < 0")
+
         lrnow = frac * self.learning_rate
         self.optimizer.param_groups[0]["lr"] = lrnow
+        self.beta = frac * self.initial_beta

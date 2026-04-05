@@ -106,7 +106,9 @@ class RunPPO:
             log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
             iem_p0=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
             iem_p1=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-            beta=self.config.beta
+            beta=self.config.beta,
+            # tsallis_q=self.config.tsallis_q,
+            # policy_head=self.config.policy_head,
         )
 
         time_steps = envs.reset()

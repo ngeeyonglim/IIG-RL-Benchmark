@@ -44,7 +44,7 @@ class CountHasher:
         decay: per-step decay factor lambda in (0,1]. 
                1.0 means no decay (original behavior).
         """
-        print("Using CountHasher with decay =", decay)
+        print(decay, "decay value for count hasher")
         self.nbins = nbins
         self.decay = float(decay)
 
@@ -125,10 +125,12 @@ class IEModule(nn.Module):
         self.r_count = 1e-6
         self.counter = CountHasher()
         self.alpha = alpha
-        print(self.alpha, "iem alpha value")
+        # print(self.alpha, "iem alpha value")
+        print(self.c1, "iem c1 value")
       
     @torch.no_grad()
     def intrinsic_reward(self, obs: torch.Tensor):
+        obs = obs.to(next(self.predictor.parameters()).device)
         pred = self.predictor(obs).squeeze(-1)
         r = self.c1 * pred
         if self.normalize:
@@ -145,6 +147,7 @@ class IEModule(nn.Module):
         """
         Supervised training step
         """
+        obs = obs.to(next(self.predictor.parameters()).device)
         self.train()
         with torch.no_grad():
             N = self.counter.update_and_get_counts(obs)   # N = B, obs = [B, obsdim]
@@ -158,6 +161,18 @@ class IEModule(nn.Module):
         loss.backward()
         self.opt.step()
         return loss.item()
+    
+    def to(self, device):
+        super().to(device)  # important: moves any registered params/buffers
+        self.device = device
+        self.predictor = self.predictor.to(device)
+
+        # move running-stat tensors
+        self.r_mean = self.r_mean.to(device)
+        self.r_var  = self.r_var.to(device)
+
+        # (optional) if you later add other tensors, move them too
+        return self
 
 
 

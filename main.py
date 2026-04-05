@@ -10,6 +10,7 @@ import time
 import torch
 import traceback
 import uuid
+import copy
 
 from algorithms.eas_exploitability import compute_exploitability, build_traverser
 from algorithms.runner import get_runner_cls
@@ -47,14 +48,22 @@ def compute_exploitability_wrapper(
 ):
     print("Computing exploitability... (this can take a few minutes)")
     t0_exploitability = time.time()
-    ev0, expl0, expl1 = compute_exploitability(
-        model_p0,
-        model_p1,
-        traverser=traverser,
-        batch_size=400_000,
-        action_selection=action_selection,
-        game_name=game_name,
-    )
+
+    model_p0_copy = copy.deepcopy(model_p0).to('cpu')
+    model_p1_copy = copy.deepcopy(model_p1).to('cpu')
+    for p in model_p0_copy.parameters():
+        p.requires_grad_(False)
+    for p in model_p1_copy.parameters():
+        p.requires_grad_(False)
+    with torch.no_grad():
+        ev0, expl0, expl1 = compute_exploitability(
+            model_p0_copy,
+            model_p1_copy,
+            traverser=traverser,
+            batch_size=400_000,
+            action_selection=action_selection,
+            game_name=game_name,
+        )
     log_data = {
         "global_step": step,
         "avg_score_response": (expl0 + expl1) / 2,

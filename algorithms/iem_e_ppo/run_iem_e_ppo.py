@@ -27,9 +27,9 @@ import torch
 import os
 
 import pyspiel
-from algorithms.new_ppo.new_ppo import PPO
-from algorithms.new_ppo.new_ppo import PPOAgent
-from algorithms.new_ppo.iem import IEModule
+from algorithms.iem_e_ppo.iem_e_ppo import PPO
+from algorithms.iem_e_ppo.iem_e_ppo import PPOAgent
+from algorithms.iem_e_ppo.iem import IEModule
 from open_spiel.python.rl_environment import ChanceEventSampler
 from open_spiel.python.rl_environment import Environment
 from open_spiel.python.vector_env import SyncVectorEnv
@@ -82,65 +82,37 @@ class RunPPO:
         assert game.get_type().reward_model == pyspiel.GameType.RewardModel.TERMINAL
 
         num_updates = self.meta_config.max_steps // batch_size + 1
-        if hasattr(self.config, "tsallis_q") and self.config.tsallis_q is not None:
-            self.agent = PPO(
-                num_actions=game.num_distinct_actions(),
-                input_shape=info_state_shape,
-                num_players=game.num_players(),
-                num_envs=self.config.num_envs,
-                steps_per_batch=self.config.num_steps,
-                num_minibatches=self.config.num_minibatches,
-                update_epochs=self.config.update_epochs,
-                learning_rate=self.config.learning_rate,
-                gae=self.config.gae,
-                gamma=self.config.gamma,
-                gae_lambda=self.config.gae_lambda,
-                normalize_advantages=self.config.norm_adv,
-                clip_coef=self.config.clip_coef,
-                clip_vloss=self.config.clip_vloss,
-                # entropy_coef=self.config.ent_coef,
-                hinge_coef=self.config.hinge_coef,
-                entropy_target=self.config.entropy_target,
-                value_coef=self.config.vf_coef,
-                max_grad_norm=self.config.max_grad_norm,
-                target_kl=self.config.target_kl,
-                device=device,
-                agent_fn=self.agent_fn,
-                log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
-                iem_p0=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-                iem_p1=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-                beta=self.config.beta,
-                tsallis_q=self.config.tsallis_q
-            )
-        else:
-            self.agent = PPO(
-                num_actions=game.num_distinct_actions(),
-                input_shape=info_state_shape,
-                num_players=game.num_players(),
-                num_envs=self.config.num_envs,
-                steps_per_batch=self.config.num_steps,
-                num_minibatches=self.config.num_minibatches,
-                update_epochs=self.config.update_epochs,
-                learning_rate=self.config.learning_rate,
-                gae=self.config.gae,
-                gamma=self.config.gamma,
-                gae_lambda=self.config.gae_lambda,
-                normalize_advantages=self.config.norm_adv,
-                clip_coef=self.config.clip_coef,
-                clip_vloss=self.config.clip_vloss,
-                # entropy_coef=self.config.ent_coef,
-                hinge_coef=self.config.hinge_coef,
-                entropy_target=self.config.entropy_target,
-                value_coef=self.config.vf_coef,
-                max_grad_norm=self.config.max_grad_norm,
-                target_kl=self.config.target_kl,
-                device=device,
-                agent_fn=self.agent_fn,
-                log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
-                iem_p0=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-                iem_p1=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
-                beta=self.config.beta
-            )
+        self.agent = PPO(
+            input_shape=info_state_shape,
+            num_actions=game.num_distinct_actions(),
+            num_players=game.num_players(),
+            num_envs=self.config.num_envs,
+            steps_per_batch=self.config.num_steps,
+            num_minibatches=self.config.num_minibatches,
+            update_epochs=self.config.update_epochs,
+            learning_rate=self.config.learning_rate,
+            gae=self.config.gae,
+            gamma=self.config.gamma,
+            gae_lambda=self.config.gae_lambda,
+            normalize_advantages=self.config.norm_adv,
+            clip_coef=self.config.clip_coef,
+            clip_vloss=self.config.clip_vloss,
+            entropy_coef=self.config.ent_coef,
+            value_coef=self.config.vf_coef,
+            max_grad_norm=self.config.max_grad_norm,
+            target_kl=self.config.target_kl,
+            device=device,
+            agent_fn=self.agent_fn,
+            log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
+            iem_p0=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
+            iem_p1=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
+            beta=self.config.beta,
+            tsallis_q=self.config.tsallis_q,
+            epsilon_start=self.config.epsilon_start,
+            epsilon_end=self.config.epsilon_end,
+            epsilon_decay_fraction=self.config.epsilon_decay_fraction,
+            epsilon_dead_tol=self.config.epsilon_dead_tol,
+        )
 
         time_steps = envs.reset()
         cp_step = 0

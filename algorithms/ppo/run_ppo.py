@@ -103,6 +103,8 @@ class RunPPO:
             device=device,
             agent_fn=self.agent_fn,
             log_file=os.path.join(self.meta_config.experiment_dir, 'train_log.csv'),
+            tsallis_q=self.config.tsallis_q,
+            # policy_head=self.config.policy_head,
         )
 
         time_steps = envs.reset()

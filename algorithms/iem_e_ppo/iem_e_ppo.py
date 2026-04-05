@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of PPO.
+"""An implementation of PPO with IEM and epsilon-revival exploration with Tsallis entropy regularization and sparsemax support.
 
 Note: code adapted (with permission) from
 https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py and
@@ -45,21 +45,46 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+def sparsemax(logits: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """Sparsemax transform that can assign exact zero probability."""
+    z = logits - logits.max(dim=dim, keepdim=True).values
+    z_sorted, _ = torch.sort(z, dim=dim, descending=True)
+    z_cumsum = z_sorted.cumsum(dim) - 1
+    k = torch.arange(1, z.size(dim) + 1, device=logits.device, dtype=logits.dtype)
+    view = [1] * z.dim()
+    view[dim] = -1
+    k = k.view(view)
+    support = z_sorted > (z_cumsum / k)
+    k_z = support.sum(dim=dim, keepdim=True).clamp(min=1)
+    tau = z_cumsum.gather(dim, k_z.long() - 1) / k_z
+    return torch.clamp(z - tau, min=0.0)
+
+
 class CategoricalMasked(Categorical):
-    """A masked categorical."""
+    """A masked categorical supporting sparsemax heads."""
 
     # pylint: disable=dangerous-default-value
     def __init__(
-        self, probs=None, logits=None, validate_args=None, masks=[], mask_value=None
+        self,
+        probs=None,
+        logits=None,
+        validate_args=None,
+        masks=[],
+        mask_value=None,
+        use_sparsemax=False,
     ):
-        logits = torch.where(masks.bool(), logits, mask_value)
-        super(CategoricalMasked, self).__init__(probs, logits, validate_args)
+        masks = masks.bool()
+        masked_logits = torch.where(masks, logits, mask_value)
+        probs = sparsemax(masked_logits, dim=-1)
+        probs = probs * masks.to(probs.dtype)
+        probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        super(CategoricalMasked, self).__init__(probs=probs, validate_args=validate_args)
 
 
 class PPOAgent(nn.Module):
     """A PPO agent module."""
 
-    def __init__(self, num_actions, observation_shape, device):
+    def __init__(self, num_actions, observation_shape, device, policy_head="sparsemax"):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(observation_shape).prod(), 512)),
@@ -82,9 +107,24 @@ class PPOAgent(nn.Module):
         self.device = device
         self.num_actions = num_actions
         self.register_buffer("mask_value", torch.tensor(INVALID_ACTION_PENALTY))
+        self.policy_head = policy_head
 
     def get_value(self, x):
         return self.critic(x)
+
+    def get_policy_outputs(self, x, legal_actions_mask=None):
+        if legal_actions_mask is None:
+            legal_actions_mask = torch.ones((len(x), self.num_actions), dtype=torch.bool, device=x.device)
+
+        logits = self.actor(x)
+        probs = CategoricalMasked(
+            logits=logits,
+            masks=legal_actions_mask,
+            mask_value=self.mask_value,
+            use_sparsemax=(self.policy_head == "sparsemax"),
+        )
+        value = self.critic(x)
+        return probs.probs, value
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         if legal_actions_mask is None:
@@ -92,14 +132,16 @@ class PPOAgent(nn.Module):
 
         logits = self.actor(x)
         probs = CategoricalMasked(
-            logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
+            logits=logits,
+            masks=legal_actions_mask,
+            mask_value=self.mask_value,
+            use_sparsemax=(self.policy_head == "sparsemax"),
         )
         if action is None:
             action = probs.sample()
         return (
             action,
             probs.log_prob(action),
-            probs.entropy(),
             self.critic(x),
             probs.probs,
         )
@@ -108,7 +150,7 @@ class PPOAgent(nn.Module):
 class PPOAtariAgent(nn.Module):
     """A PPO Atari agent module."""
 
-    def __init__(self, num_actions, observation_shape, device):
+    def __init__(self, num_actions, observation_shape, device, policy_head="sparsemax"):
         super(PPOAtariAgent, self).__init__()
         # Note: this network is intended for atari games, taken from
         # https://github.com/vwxyzjn/ppo-implementation-details/blob/main/ppo_atari.py
@@ -128,9 +170,25 @@ class PPOAtariAgent(nn.Module):
         self.num_actions = num_actions
         self.device = device
         self.register_buffer("mask_value", torch.tensor(INVALID_ACTION_PENALTY))
+        self.policy_head = policy_head
 
     def get_value(self, x):
         return self.critic(self.network(x / 255.0))
+
+    def get_policy_outputs(self, x, legal_actions_mask=None):
+        if legal_actions_mask is None:
+            legal_actions_mask = torch.ones((len(x), self.num_actions), dtype=torch.bool, device=x.device)
+
+        hidden = self.network(x / 255.0)
+        logits = self.actor(hidden)
+        probs = CategoricalMasked(
+            logits=logits,
+            masks=legal_actions_mask,
+            mask_value=self.mask_value,
+            use_sparsemax=(self.policy_head == "sparsemax"),
+        )
+        value = self.critic(hidden)
+        return probs.probs, value
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         if legal_actions_mask is None:
@@ -139,7 +197,10 @@ class PPOAtariAgent(nn.Module):
         hidden = self.network(x / 255.0)
         logits = self.actor(hidden)
         probs = CategoricalMasked(
-            logits=logits, masks=legal_actions_mask, mask_value=self.mask_value
+            logits=logits,
+            masks=legal_actions_mask,
+            mask_value=self.mask_value,
+            use_sparsemax=(self.policy_head == "sparsemax"),
         )
 
         if action is None:
@@ -147,7 +208,6 @@ class PPOAtariAgent(nn.Module):
         return (
             action,
             probs.log_prob(action),
-            probs.entropy(),
             self.critic(hidden),
             probs.probs,
         )
@@ -174,14 +234,9 @@ def legal_actions_to_mask(legal_actions_list, num_actions):
 
 
 class PPO(nn.Module):
-    """PPO Agent implementation in PyTorch.
+    """A PPO class.
 
-    See open_spiel/python/examples/ppo_example.py for an usage example.
-
-    Note that PPO runs multiple environments concurrently on each step (see
-    open_spiel/python/vector_env.py). In practice, this tends to improve PPO's
-    performance. The number of parallel environments is controlled by the
-    num_envs argument.
+    This class implements a PPO agent with IEM.
     """
 
     def __init__(
@@ -207,9 +262,20 @@ class PPO(nn.Module):
         device="cpu",
         agent_fn=PPOAtariAgent,
         log_file=None,
+        iem_p0=None,
+        iem_p1=None,
+        beta=0.1,
+        tsallis_q=2.0,
+        policy_head="sparsemax",
+        epsilon_start=0.10,
+        epsilon_end=0.02,
+        epsilon_decay_fraction=0.5,
+        epsilon_dead_tol=1e-4,
         **kwargs,
     ):
         super().__init__()
+
+        print("Using Tsallis-PPO with IEM + epsilon-revival exploration")
 
         self.input_shape = (np.array(input_shape).prod(),)
         self.num_actions = num_actions
@@ -235,12 +301,29 @@ class PPO(nn.Module):
         self.clip_coef = clip_coef
         self.clip_vloss = clip_vloss
         self.entropy_coef = entropy_coef
+        # Tsallis entropy configuration (q != 1). We will use normalized Tsallis entropy in [0, 1].
+        self.tsallis_q = float(tsallis_q)
+        if abs(self.tsallis_q - 1.0) < 1e-8:
+            raise ValueError(
+                "tsallis_q must be != 1.0 (q=1 corresponds to Shannon entropy)."
+            )
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
+        self.beta = beta
+        self.policy_head = policy_head
+        self.epsilon_start = float(epsilon_start)
+        self.epsilon_end = float(epsilon_end)
+        self.epsilon_decay_fraction = float(epsilon_decay_fraction)
+        self.epsilon_dead_tol = float(epsilon_dead_tol)
+        self.current_epsilon = self.epsilon_start
+        print(
+            f"Tsallis q: {self.tsallis_q}, beta: {self.beta}, policy_head: {self.policy_head}, "
+            f"epsilon_start: {self.epsilon_start}, epsilon_end: {self.epsilon_end}"
+        )
 
         # Initialize networks
-        self.network = agent_fn(self.num_actions, self.input_shape, device).to(device)
+        self.network = agent_fn(self.num_actions, self.input_shape, device, policy_head=self.policy_head).to(device)
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate, eps=1e-5)
 
         # Initialize training buffers
@@ -255,21 +338,30 @@ class PPO(nn.Module):
         self.rewards = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
         self.dones = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
         self.values = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
+        self.rollout_epsilons = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
         self.current_players = torch.zeros((self.steps_per_batch, self.num_envs)).to(
             device
         )
+        self.selected_action_was_dead = torch.zeros(
+            (self.steps_per_batch, self.num_envs), dtype=torch.bool
+        ).to(device)
 
         # Initialize counters
         self.cur_batch_idx = 0
         self.total_steps_done = 0
         self.updates_done = 0
+        self._num_total_updates = 1
         self.start_time = time.time()
 
-        # Entropy tracking
-        self.accumulated_entropy = 0.0   # sum of mean entropies across step() calls
-        self.entropy_count = 0           # number of step() calls accumulated
-        self.last_log_step = 0           # last self.total_steps_done when we logged
-        self.log_interval = 100000        # in "environment steps" (same units as total_steps_done)
+        # Initialize exploration module
+        self.iem_p0 = iem_p0
+        self.iem_p1 = iem_p1
+
+        # Init for entropy logging
+        self.accumulated_entropy = 0.0
+        self.entropy_count = 0
+        self.last_log_step = 0
+        self.log_interval = 100000
 
         # ----------------------------
         # Visitation tracking (ported)
@@ -292,10 +384,17 @@ class PPO(nn.Module):
         self._visit_total_p0 = 0
         self._visit_total_p1 = 0
 
-        # --- SimHash bucket visitation ---
+        # --- B2: SimHash bucket visitation ---
         self.visitation_use_simhash = True
+
+        # Number of bits in full SimHash signature (more bits = finer similarity)
         self.simhash_bits = 64
+
+        # Number of prefix bits used as bucket id (grid size = 2^prefix_bits)
+        # 10 -> 1024 buckets, 12 -> 4096 buckets
         self.simhash_prefix_bits = 14
+
+        # Make it deterministic across runs if you want reproducible bucket layouts
         self.simhash_seed = 12345
 
         # Pre-sample random hyperplanes for SimHash: [bits, D]
@@ -304,9 +403,6 @@ class PPO(nn.Module):
         self._simhash_planes = rng.standard_normal(size=(self.simhash_bits, D)).astype(
             np.float32
         )
-
-        # Quantize info_state before hashing (improves stability across float noise)
-        self.visitation_quantize = True
 
         # Write CSV header once
         if (
@@ -317,17 +413,100 @@ class PPO(nn.Module):
             with open(self.visitation_csv_path, "w") as f:
                 f.write("steps,player,bucket_id,count\n")
 
+        self.visitation_quantize = True
+
+        # ----------------------------
+        # IEM logging (per log window)
+        # ----------------------------
+        self._iem_r0_sum = 0.0
+        self._iem_r0_cnt = 0
+        self._iem_r1_sum = 0.0
+        self._iem_r1_cnt = 0
+        self._adv_sum = 0.0
+        self._adv_cnt = 0
+
+        # ----------------------------
+        # Epsilon-revival logging (per log window)
+        # ----------------------------
+        self._eps_dead_legal_fraction_sum = 0.0
+        self._eps_dead_legal_fraction_cnt = 0
+        self._eps_states_with_dead_count = 0
+        self._eps_state_count = 0
+        self._eps_used_revival_count = 0
+        self._eps_revival_dead_branch_count = 0
+        self._eps_selected_dead_action_count = 0
+        self._eps_selected_action_count = 0
+
+
     def get_value(self, x):
         return self.network.get_value(x)
 
-    def get_action_and_value(self, x, legal_actions_mask=None, action=None):
-        return self.network.get_action_and_value(x, legal_actions_mask, action)
+    def _current_training_epsilon(self):
+        if self.epsilon_decay_fraction <= 0:
+            return self.epsilon_end
+        progress = min(1.0, self.updates_done / max(1.0, self.epsilon_decay_fraction * max(1, self._num_total_updates)))
+        eps = self.epsilon_start + (self.epsilon_end - self.epsilon_start) * progress
+        return float(max(self.epsilon_end, eps)) if self.epsilon_start >= self.epsilon_end else float(min(self.epsilon_end, eps))
+
+    def _compute_revival_distribution(self, base_probs, legal_actions_mask):
+        legal = legal_actions_mask.bool()
+        dead_mask = legal & (base_probs <= self.epsilon_dead_tol)
+
+        revival = torch.zeros_like(base_probs)
+        has_dead = dead_mask.any(dim=-1)
+
+        if has_dead.any():
+            dead_counts = dead_mask[has_dead].sum(dim=-1, keepdim=True).clamp(min=1)
+            revival[has_dead] = dead_mask[has_dead].to(base_probs.dtype) / dead_counts.to(base_probs.dtype)
+
+        return revival
+
+    def _behavior_probs(self, base_probs, legal_actions_mask, epsilon):
+        legal = legal_actions_mask.to(base_probs.dtype)
+        revival_probs = self._compute_revival_distribution(base_probs, legal_actions_mask)
+        has_dead = (revival_probs.sum(dim=-1, keepdim=True) > 0).to(base_probs.dtype)
+        if not torch.is_tensor(epsilon):
+            epsilon = torch.full(
+                (base_probs.shape[0], 1),
+                float(epsilon),
+                dtype=base_probs.dtype,
+                device=base_probs.device,
+            )
+        else:
+            epsilon = epsilon.to(base_probs.device, dtype=base_probs.dtype).view(-1, 1)
+
+        effective_epsilon = epsilon * has_dead
+        behavior_probs = (1.0 - effective_epsilon) * base_probs + effective_epsilon * revival_probs
+        behavior_probs = behavior_probs * legal
+        behavior_probs = behavior_probs / behavior_probs.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        return behavior_probs
+
+    def get_action_and_value(self, x, legal_actions_mask=None, action=None, epsilon=None, greedy_eval=False, return_behavior=False):
+        base_probs, value = self.network.get_policy_outputs(x, legal_actions_mask)
+        if greedy_eval:
+            action = torch.argmax(base_probs, dim=-1)
+            probs_to_return = torch.nn.functional.one_hot(action, num_classes=self.num_actions).to(base_probs.dtype)
+            selected_probs = probs_to_return.gather(-1, action.unsqueeze(-1)).squeeze(-1).clamp(min=1e-12)
+            return action, selected_probs.log(), value, probs_to_return
+
+        if epsilon is None:
+            epsilon = self.current_epsilon
+        behavior_probs = self._behavior_probs(base_probs, legal_actions_mask, epsilon)
+        dist = Categorical(probs=behavior_probs)
+        if action is None:
+            action = dist.sample()
+        logprob = dist.log_prob(action)
+        probs_to_return = behavior_probs if return_behavior else base_probs
+        return action, logprob, value, probs_to_return
 
     # ----------------------------
     # Visitation helpers (ported)
     # ----------------------------
     def _simhash_bucket_id(self, x: np.ndarray) -> int:
-        """Returns a SimHash bucket id for an info_state vector x (shape [D])."""
+        """
+        SimHash bucket for an info_state vector x (shape [D]).
+        Returns an int in [0, 2^simhash_prefix_bits).
+        """
         if self.visitation_quantize:
             v = np.rint(x).astype(np.float32, copy=False)
         else:
@@ -343,12 +522,47 @@ class PPO(nn.Module):
         return bucket
 
     def _infoset_id_from_tensor(self, x: np.ndarray) -> str:
-        """Stable infoset identity from info_state tensor."""
+        """
+        Stable infoset identity from info_state tensor.
+        x: shape [D] numpy array (float or int)
+        Returns: short hex string id
+        """
         if self.visitation_quantize:
             xb = np.rint(x).astype(np.int8, copy=False).tobytes()
         else:
             xb = x.astype(np.float32, copy=False).tobytes()
+
         return hashlib.blake2b(xb, digest_size=8).hexdigest()
+
+    def _tsallis_entropy_norm(
+        self, probs: torch.Tensor, legal_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Normalized Tsallis entropy in [0, 1] for categorical policies with varying legal action counts.
+
+        Args:
+            probs:      [B, A] probabilities (policy probabilities).
+            legal_mask: [B, A] bool mask of legal actions.
+
+        Returns:
+            ent_norm: [B] normalized Tsallis entropy.
+        """
+        eps = 1e-12
+        q = self.tsallis_q
+
+        p = probs * legal_mask.to(probs.dtype)
+        p = p / (p.sum(dim=-1, keepdim=True) + eps)
+        p = torch.clamp(p, min=0.0, max=1.0)
+
+        sum_pq = (p**q).sum(dim=-1)  # [B]
+        Hq = (1.0 - sum_pq) / (q - 1.0)
+
+        n = legal_mask.sum(dim=-1).to(probs.dtype)
+        n = torch.clamp(n, min=1.0)
+        Hq_max = (1.0 - n ** (1.0 - q)) / (q - 1.0)
+
+        ent_norm = Hq / (Hq_max + eps)
+        return torch.clamp(ent_norm, 0.0, 1.0)
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -360,7 +574,7 @@ class PPO(nn.Module):
                     ],
                     self.num_actions,
                 ).to(self.device)
-                obs = torch.Tensor(
+                obs = torch.as_tensor(
                     np.array(
                         [
                             np.reshape(
@@ -368,19 +582,19 @@ class PPO(nn.Module):
                                 self.input_shape,
                             )
                             for ts in time_step
-                        ]
-                    )
-                ).to(self.device)
-                action, _, _, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
+                        ],
+                        dtype=np.float32,
+                    ),
+                    device=self.device,
+                )
+                action, _, value, probs = self.get_action_and_value(
+                    obs, legal_actions_mask=legal_actions_mask, greedy_eval=True
                 )
                 return [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
+                    StepOutput(action=a.item(), probs=p.detach().cpu().numpy()) for (a, p) in zip(action, probs)
                 ]
         else:
             with torch.no_grad():
-                # act
                 obs = torch.Tensor(
                     np.array(
                         [
@@ -399,29 +613,66 @@ class PPO(nn.Module):
                     ],
                     self.num_actions,
                 ).to(self.device)
-                current_players = torch.Tensor(
-                    [ts.current_player() for ts in time_step]
-                ).to(self.device)
-
-                action, logprob, entropy, value, probs = self.get_action_and_value(
-                    obs, legal_actions_mask=legal_actions_mask
+                current_players = torch.as_tensor(
+                    [ts.current_player() for ts in time_step],
+                    device=self.device,
+                    dtype=torch.int64,
                 )
 
-                # store
+                self.current_epsilon = self._current_training_epsilon()
+
+                base_probs, value = self.network.get_policy_outputs(obs, legal_actions_mask)
+                revival_probs = self._compute_revival_distribution(base_probs, legal_actions_mask)
+                has_dead = revival_probs.sum(dim=-1) > 0
+
+                behavior_probs = self._behavior_probs(
+                    base_probs, legal_actions_mask, self.current_epsilon
+                )
+
+                use_revival = (
+                    (torch.rand(base_probs.shape[0], device=self.device) < float(self.current_epsilon))
+                    & has_dead
+                )
+
+                sampled_probs = base_probs.clone()
+                if use_revival.any():
+                    sampled_probs[use_revival] = revival_probs[use_revival]
+
+                dist = Categorical(probs=sampled_probs)
+                action = dist.sample()
+                selected_probs = behavior_probs.gather(-1, action.unsqueeze(-1)).squeeze(-1).clamp(min=1e-12)
+                logprob = selected_probs.log()
+
+                dead_mask = legal_actions_mask.bool() & (base_probs <= self.epsilon_dead_tol)
+                selected_was_dead = dead_mask.gather(-1, action.unsqueeze(-1)).squeeze(-1)
+
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
                 self.actions[self.cur_batch_idx] = action
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
+                self.rollout_epsilons[self.cur_batch_idx] = self.current_epsilon
                 self.current_players[self.cur_batch_idx] = current_players
+                self.selected_action_was_dead[self.cur_batch_idx] = selected_was_dead
 
-                # entropy tracking
-                self.accumulated_entropy += entropy.mean().item()
+                tsallis_ent = self._tsallis_entropy_norm(
+                    base_probs, legal_actions_mask
+                )  # [num_envs]
+                self.accumulated_entropy += tsallis_ent.mean().item()
                 self.entropy_count += 1
 
+                dead_legal_fraction = dead_mask.float().sum(dim=-1) / legal_actions_mask.float().sum(dim=-1).clamp(min=1.0)
+                self._eps_dead_legal_fraction_sum += float(dead_legal_fraction.sum().item())
+                self._eps_dead_legal_fraction_cnt += int(dead_legal_fraction.numel())
+                self._eps_states_with_dead_count += int(has_dead.sum().item())
+                self._eps_state_count += int(has_dead.numel())
+                self._eps_used_revival_count += int(use_revival.sum().item())
+                self._eps_revival_dead_branch_count += int(use_revival.sum().item())
+                self._eps_selected_dead_action_count += int(selected_was_dead.sum().item())
+                self._eps_selected_action_count += int(selected_was_dead.numel())
+
                 agent_output = [
-                    StepOutput(action=a.item(), probs=p)
-                    for (a, p) in zip(action, probs)
+                    StepOutput(action=a.item(), probs=p.detach().cpu().numpy()) for (a, p) in zip(action, base_probs)
                 ]
                 return agent_output
 
@@ -472,29 +723,33 @@ class PPO(nn.Module):
                 returns = torch.zeros_like(self.rewards).to(self.device)
                 for t in reversed(range(self.steps_per_batch)):
                     next_return = (
-                        next_value if t == self.steps_per_batch - 1 else returns[t + 1]
+                        next_value
+                        if t == self.steps_per_batch - 1
+                        else returns[t + 1]
                     )
                     nextnonterminal = 1.0 - self.dones[t]
-                    returns[t] = (
-                        self.rewards[t] + self.gamma * nextnonterminal * next_return
-                    )
+                    returns[t] = self.rewards[t] + self.gamma * nextnonterminal * next_return
                 advantages = returns - self.values
 
         # flatten the batch
-        b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
         b_obs = self.obs.reshape((-1,) + self.input_shape)
         b_logprobs = self.logprobs.reshape(-1)
         b_actions = self.actions.reshape(-1)
         b_advantages = advantages.reshape(-1)
+        b_players = self.current_players.reshape(-1).to(self.device)
+        b_legal_actions_mask = self.legal_actions_mask.reshape((-1, self.num_actions))
         b_returns = returns.reshape(-1)
         b_values = self.values.reshape(-1)
-        b_players = self.current_players.reshape(-1)
+        b_rollout_epsilons = self.rollout_epsilons.reshape(-1)
+        b_selected_action_was_dead = self.selected_action_was_dead.reshape(-1)
+
+        B = b_advantages.shape[0]
+        b_rint = torch.zeros(B, device=self.device)
 
         # ----------------------------------------
         # Visitation logging (accumulate per window)
         # ----------------------------------------
         if self.track_visitation:
-            B = b_obs.shape[0]
             b_obs_np = b_obs.detach().cpu().numpy()  # [B, D]
             b_players_np = b_players.detach().cpu().numpy().astype(np.int32)  # [B]
             dones_np = self.dones.reshape(-1).detach().cpu().numpy()
@@ -516,8 +771,57 @@ class PPO(nn.Module):
                     self._visit_counter_p1[key] += 1
                     self._visit_total_p1 += 1
 
-        b_playersigns = -2.0 * b_players + 1.0
-        b_advantages *= b_playersigns
+        if (self.iem_p1 is not None) and (self.iem_p0 is not None):
+            b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
+            b_dones = self.dones.reshape(-1).to(self.device)  # [B]
+
+            alive = b_dones == 0
+            mask0 = ((b_players == 0) & alive).to(self.device)
+            if mask0.any():
+                self.iem_p0.update(b_obs_full[mask0])
+
+            mask1 = ((b_players == 1) & alive).to(self.device)
+            if mask1.any():
+                self.iem_p1.update(b_obs_full[mask1])
+
+            with torch.no_grad():
+                mask0 = (b_players == 0) & alive
+                if mask0.any():
+                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0]).to(self.device)
+                    tmp0 = torch.zeros_like(b_rint)
+                    # print(tmp0.device, mask0.device, r0.device, b_players.device, b_dones.device)
+                    tmp0[mask0] = r0
+                    b_rint += self.beta * tmp0
+                    # average b_rint
+                    # print(b_rint[mask0].mean().item())
+                    
+                    # ---- IEM reward mean tracking (raw intrinsic reward, before beta scaling) ----
+                    self._iem_r0_sum += float(r0.mean().item())
+                    self._iem_r0_cnt += 1
+
+
+                mask1 = (b_players == 1) & alive
+                if mask1.any():
+                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1]).to(self.device)
+                    tmp1 = torch.zeros_like(b_rint)
+                    tmp1[mask1] = r1
+                    b_rint += self.beta * tmp1
+                    # print(b_rint[mask1].mean().item())
+                    self._iem_r1_sum += float(r1.mean().item())
+                    self._iem_r1_cnt += 1
+
+                assert mask0.sum() > 0
+                assert mask1.sum() > 0
+                assert mask0.sum() + mask1.sum() == alive.sum()
+        else:
+            raise ValueError("IEM modules not initialized in PPO")
+
+        b_playersigns = -2.0 * b_players + 1.0  # +1 for p0, -1 for p1
+        b_advantages_ext = b_advantages
+        b_advantages = b_advantages_ext * b_playersigns
+        self._adv_sum += float(b_advantages.mean().item())
+        self._adv_cnt += 1
+        b_advantages = b_advantages + b_rint
 
         # Optimizing the policy and value network
         b_inds = np.arange(self.batch_size)
@@ -528,16 +832,17 @@ class PPO(nn.Module):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
+                _, newlogprob, newvalue, new_probs = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
+                    epsilon=b_rollout_epsilons[mb_inds],
+                    return_behavior=True,
                 )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfracs += [
@@ -572,12 +877,12 @@ class PPO(nn.Module):
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                entropy_loss = entropy.mean()
-                loss = (
-                    pg_loss
-                    - self.entropy_coef * entropy_loss
-                    + v_loss * self.value_coef
+                tsallis_ent = self._tsallis_entropy_norm(
+                    new_probs, b_legal_actions_mask[mb_inds]
                 )
+                entropy_loss = tsallis_ent.mean()
+
+                loss = pg_loss - self.entropy_coef * entropy_loss + v_loss * self.value_coef
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -588,18 +893,52 @@ class PPO(nn.Module):
                 if approx_kl > self.target_kl:
                     break
 
+        with torch.no_grad():
+            post_base_probs, _ = self.network.get_policy_outputs(b_obs, b_legal_actions_mask)
+            post_selected_probs = post_base_probs.gather(-1, b_actions.long().unsqueeze(-1)).squeeze(-1)
+            dead_reentered_mask = b_selected_action_was_dead & (post_selected_probs > self.epsilon_dead_tol)
+            dead_selected_count = int(b_selected_action_was_dead.sum().item())
+            dead_reentered_fraction = (
+                float(dead_reentered_mask.sum().item()) / float(dead_selected_count)
+                if dead_selected_count > 0
+                else float("nan")
+            )
+
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # Check if 10,000 steps have passed since the last log
+        # Log every log_interval
         if self.total_steps_done - self.last_log_step >= self.log_interval:
             avg_entropy = self.accumulated_entropy / max(1, self.entropy_count)
-            
+
             log_data = {
                 "steps": self.total_steps_done,
                 "avg_entropy": avg_entropy,
             }
+
+            def _safe_div(num, den):
+                return float(num / den) if den > 0 else float("nan")
+
+            log_data.update(
+                {
+                    "eps_dead_legal_fraction_mean": _safe_div(
+                        self._eps_dead_legal_fraction_sum, self._eps_dead_legal_fraction_cnt
+                    ),
+                    "eps_states_with_dead_fraction": _safe_div(
+                        self._eps_states_with_dead_count, self._eps_state_count
+                    ),
+                    "eps_used_revival_fraction": _safe_div(
+                        self._eps_used_revival_count, self._eps_state_count
+                    ),
+                    "eps_revival_dead_branch_count": int(self._eps_revival_dead_branch_count),
+                    "eps_selected_dead_action_fraction": _safe_div(
+                        self._eps_selected_dead_action_count, self._eps_selected_action_count
+                    ),
+                    "eps_dead_action_reentered_fraction": dead_reentered_fraction,
+                    "epsilon_current": float(self.current_epsilon),
+                }
+            )
 
             # ----------------------------
             # Visitation interval summary + dump (ported)
@@ -616,11 +955,15 @@ class PPO(nn.Module):
                     top10_sum = sum(cnt for _, cnt in top10)
                     top10_share = top10_sum / float(total_visits)
 
-                    # normalized entropy over unique keys: H(p)/log(|S|)
+                    # normalized entropy of visitation distribution over unique keys
+                    # H(p)/log(|S|)
                     probs = np.array([c for _, c in counter.items()], dtype=np.float64)
                     probs = probs / probs.sum()
                     ent = -np.sum(probs * np.log(probs + 1e-12))
-                    ent_norm = 0.0 if uniq <= 1 else float(ent / np.log(uniq))
+                    if uniq <= 1:
+                        ent_norm = 0.0
+                    else:
+                        ent_norm = float(ent / np.log(uniq))
 
                     return dict(
                         total=int(total_visits),
@@ -645,6 +988,18 @@ class PPO(nn.Module):
                     }
                 )
 
+                # ----------------------------
+                # IEM summary (per interval)
+                # ----------------------------
+                def _safe_mean(s, c):
+                    return float(s / c) if c > 0 else float("nan")
+
+                log_data.update({
+                    "iem_rint_mean_p0": _safe_mean(self._iem_r0_sum, self._iem_r0_cnt),
+                    "iem_rint_mean_p1": _safe_mean(self._iem_r1_sum, self._iem_r1_cnt),
+                    "adv_mean": _safe_mean(self._adv_sum, self._adv_cnt),
+                })
+
                 # Dump interval top-K to CSV (one row per state/bucket)
                 if self.visitation_csv_path is not None:
                     with open(self.visitation_csv_path, "a") as f:
@@ -663,48 +1018,40 @@ class PPO(nn.Module):
                 self._visit_counter_p1.clear()
                 self._visit_total_p0 = 0
                 self._visit_total_p1 = 0
+                self._iem_r0_sum = 0.0; self._iem_r0_cnt = 0
+                self._iem_r1_sum = 0.0; self._iem_r1_cnt = 0
+                self._adv_sum = 0.0; self._adv_cnt = 0
 
-            # Use the utility to write to train_log.csv
+            # write to train_log.csv
             log_to_csv(log_data, self.log_file)
-            
+
             # Reset trackers for the next interval
             self.accumulated_entropy = 0.0
             self.entropy_count = 0
             self.last_log_step = self.total_steps_done
+            self._eps_dead_legal_fraction_sum = 0.0
+            self._eps_dead_legal_fraction_cnt = 0
+            self._eps_states_with_dead_count = 0
+            self._eps_state_count = 0
+            self._eps_used_revival_count = 0
+            self._eps_revival_dead_branch_count = 0
+            self._eps_selected_dead_action_count = 0
+            self._eps_selected_action_count = 0
 
-        # Commented this out because it takes too much disk space for the large sweep
-        # log_data = {
-        #     "steps": self.total_steps_done,
-        #     "charts/learning_rate": self.optimizer.param_groups[0]["lr"],
-        #     "losses/value_loss": v_loss.item(),
-        #     "losses/policy_loss": pg_loss.item(),
-        #     "losses/entropy": entropy_loss.item(),
-        #     "losses/old_approx_kl": old_approx_kl.item(),
-        #     "losses/approx_kl": approx_kl.item(),
-        #     "losses/clipfrac": np.mean(clipfracs),
-        #     "losses/explained_variance": explained_var,
-        #     "charts/SPS": int(
-        #         self.total_steps_done / (time.time() - self.start_time)
-        #     ),
-        # }
-        # log_to_csv(log_data, self.log_file)
-
-        # Update counters
         self.updates_done += 1
         self.cur_batch_idx = 0
 
     def save(self, path):
-        """Saves the actor weights to path"""
         torch.save(self.network.actor.state_dict(), path)
 
     def load(self, path):
-        """Loads weights from actor checkpoint"""
         self.network.actor.load_state_dict(torch.load(path))
 
     def anneal_learning_rate(self, update, num_total_updates):
-        # Annealing the rate
+        self._num_total_updates = max(1, num_total_updates)
         frac = max(0, 1.0 - (update / num_total_updates))
         if frac < 0:
             raise ValueError("Annealing learning rate to < 0")
         lrnow = frac * self.learning_rate
         self.optimizer.param_groups[0]["lr"] = lrnow
+        self.current_epsilon = self._current_training_epsilon()

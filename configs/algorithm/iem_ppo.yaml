@@ -1,22 +1,51 @@
-algorithm_name: iem_ppo  # Name of the algorithm
-learning_rate: 0.00025  # the learning rate of the optimizer
-eval_every: 100  # evaluate the policy every N updates
-cuda: true  # if toggled, cuda will be enabled by default
-num_envs: 8  # the number of parallel game environments
-num_steps: 128  # the number of steps to run in each environment per policy rollout (batch size is num_steps * num_envs)
-anneal_lr: true  # Toggle learning rate annealing for policy and value networks
-gae: true  # Use GAE for advantage computation
-gamma: 0.99  # the discount factor gamma
-gae_lambda: 0.95  # the lambda for the general advantage estimation
-num_minibatches: 4  # the number of mini-batches
-update_epochs: 4  # the K epochs to update the policy
-norm_adv: true  # Toggles advantages normalization
-clip_coef: 0.1  # the surrogate clipping coefficient
-clip_vloss: true  # Toggles whether or not to use a clipped loss for the value function, as per the paper
-ent_coef: 0.2  # coefficient of the entropy
-vf_coef: 0.5  # coefficient of the value function
-max_grad_norm: 0.5  # the maximum norm for the gradient clipping
-target_kl: null  # the target KL divergence threshold
-iem_lr: 0.0005
-alpha: 0.7  # exponent for scaling intrinsic reward 1 / n^alpha
-beta: 1.0 # amount to scale intrinsic reward
+# Tsallis
+# algorithm_name: iem_ppo
+# learning_rate: 0.002
+# eval_every: 100
+# cuda: true
+# num_envs: 8
+# num_steps: 512
+# anneal_lr: true
+# gae: true
+# gamma: 0.99
+# gae_lambda: 0.95
+# num_minibatches: 2
+# update_epochs: 2
+# norm_adv: true
+# clip_coef: 0.05
+# clip_vloss: true
+# ent_coef: 0.20
+# vf_coef: 0.0625
+# max_grad_norm: 0.5
+# target_kl: null
+# iem_lr: 0.001
+# alpha: 0.4
+# beta: 0.5
+# tsallis_q: 2.0
+# policy_head: softmax
+
+# # Shannon# 
+algorithm_name: iem_ppo
+learning_rate: 0.002
+eval_every: 10
+cuda: True
+num_envs: 8
+num_steps: 512
+anneal_lr: true
+gae: true
+gamma: 0.99
+gae_lambda: 0.95
+num_minibatches: 2
+update_epochs: 1
+norm_adv: true
+clip_coef: 0.05
+clip_vloss: true
+ent_coef: 0.1
+vf_coef: 0.0625
+max_grad_norm: 2.0
+target_kl: null
+iem_lr: 0.001
+alpha: 0.5
+beta: 3.0
+
+

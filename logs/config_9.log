@@ -1,0 +1,225 @@
+ WARN Encountered 1 warning while parsing the manifest:
+  ⚠ The `project` field is deprecated. Use `workspace` instead.
+   ╭─[/home/ngeeyong/projects/IIG-RL-Benchmark/pixi.toml:1:1]
+ 1 │ ╭─▶ [project]
+ 2 │ │   name = "2p0s-pixi"
+ 3 │ │   channels = ["https://repo.prefix.dev/rando-forge", "conda-forge", "nodefaults"]
+ 4 │ ├─▶ platforms = ["linux-64"]
+   · ╰──── replace this with 'workspace'
+ 5 │     
+   ╰────
+
+[1774927770.637|>INFO] [traverser.cpp:271] discovering infosets (num threads: 24)...
+[1774927775.171|>INFO] [traverser.cpp:296]   > thread 51 found 0.16M infosets (0.18B nodes)
+[1774927775.250|>INFO] [traverser.cpp:296]   > thread 63 found 0.16M infosets (0.18B nodes)
+[1774927776.619|>INFO] [traverser.cpp:296]   > thread 45 found 0.16M infosets (0.18B nodes)
+[1774927776.638|>INFO] [traverser.cpp:296]   > thread 66 found 0.20M infosets (0.23B nodes)
+[1774927776.645|>INFO] [traverser.cpp:296]   > thread 54 found 0.21M infosets (0.23B nodes)
+[1774927776.784|>INFO] [traverser.cpp:296]   > thread 75 found 0.18M infosets (0.18B nodes)
+[1774927777.943|>INFO] [traverser.cpp:296]   > thread 04 found 0.18M infosets (0.21B nodes)
+[1774927778.074|>INFO] [traverser.cpp:296]   > thread 69 found 0.23M infosets (0.28B nodes)
+[1774927778.079|>INFO] [traverser.cpp:296]   > thread 36 found 0.20M infosets (0.22B nodes)
+[1774927778.095|>INFO] [traverser.cpp:296]   > thread 42 found 0.20M infosets (0.22B nodes)
+[1774927778.143|>INFO] [traverser.cpp:296]   > thread 57 found 0.25M infosets (0.29B nodes)
+[1774927778.539|>INFO] [traverser.cpp:296]   > thread 12 found 0.20M infosets (0.23B nodes)
+[1774927778.613|>INFO] [traverser.cpp:296]   > thread 60 found 0.49M infosets (0.30B nodes)
+[1774927778.740|>INFO] [traverser.cpp:296]   > thread 78 found 0.21M infosets (0.23B nodes)
+[1774927778.770|>INFO] [traverser.cpp:296]   > thread 39 found 0.22M infosets (0.24B nodes)
+[1774927778.810|>INFO] [traverser.cpp:296]   > thread 28 found 0.20M infosets (0.23B nodes)
+[1774927779.530|>INFO] [traverser.cpp:296]   > thread 48 found 0.27M infosets (0.34B nodes)
+[1774927779.867|>INFO] [traverser.cpp:296]   > thread 72 found 0.22M infosets (0.27B nodes)
+[1774927779.948|>INFO] [traverser.cpp:296]   > thread 24 found 0.22M infosets (0.27B nodes)
+[1774927780.249|>INFO] [traverser.cpp:296]   > thread 08 found 0.22M infosets (0.27B nodes)
+[1774927781.302|>INFO] [traverser.cpp:296]   > thread 55 found 0.18M infosets (0.18B nodes)
+[1774927781.302|>INFO] [traverser.cpp:296]   > thread 20 found 0.49M infosets (0.30B nodes)
+[1774927781.320|>INFO] [traverser.cpp:296]   > thread 52 found 0.20M infosets (0.23B nodes)
+[1774927781.511|>INFO] [traverser.cpp:296]   > thread 00 found 0.49M infosets (0.30B nodes)
+[1774927782.132|>INFO] [traverser.cpp:296]   > thread 16 found 0.27M infosets (0.34B nodes)
+[1774927782.459|>INFO] [traverser.cpp:296]   > thread 32 found 0.27M infosets (0.34B nodes)
+[1774927782.489|>INFO] [traverser.cpp:296]   > thread 67 found 0.19M infosets (0.23B nodes)
+[1774927783.580|>INFO] [traverser.cpp:296]   > thread 58 found 0.18M infosets (0.21B nodes)
+[1774927784.055|>INFO] [traverser.cpp:296]   > thread 76 found 0.18M infosets (0.21B nodes)
+[1774927784.067|>INFO] [traverser.cpp:296]   > thread 05 found 0.18M infosets (0.18B nodes)
+[1774927784.376|>INFO] [traverser.cpp:296]   > thread 64 found 0.27M infosets (0.34B nodes)
+[1774927784.646|>INFO] [traverser.cpp:296]   > thread 46 found 0.20M infosets (0.23B nodes)
+[1774927785.016|>INFO] [traverser.cpp:296]   > thread 29 found 0.16M infosets (0.18B nodes)
+[1774927785.404|>INFO] [traverser.cpp:296]   > thread 49 found 0.19M infosets (0.23B nodes)
+[1774927785.983|>INFO] [traverser.cpp:296]   > thread 25 found 0.18M infosets (0.18B nodes)
+[1774927786.163|>INFO] [traverser.cpp:296]   > thread 61 found 0.25M infosets (0.29B nodes)
+[1774927786.310|>INFO] [traverser.cpp:296]   > thread 37 found 0.22M infosets (0.24B nodes)
+[1774927786.360|>INFO] [traverser.cpp:296]   > thread 43 found 0.22M infosets (0.24B nodes)
+[1774927786.371|>INFO] [traverser.cpp:296]   > thread 73 found 0.18M infosets (0.18B nodes)
+[1774927786.440|>INFO] [traverser.cpp:296]   > thread 13 found 0.19M infosets (0.23B nodes)
+[1774927786.578|>INFO] [traverser.cpp:296]   > thread 70 found 0.52M infosets (0.32B nodes)
+[1774927787.502|>INFO] [traverser.cpp:296]   > thread 21 found 0.18M infosets (0.18B nodes)
+[1774927788.208|>INFO] [traverser.cpp:296]   > thread 17 found 0.16M infosets (0.18B nodes)
+[1774927788.210|>INFO] [traverser.cpp:296]   > thread 5Logging at results/test/iem_e_ppo/classical_phantom_ttt/2026-03-31_11-29-30-614779_bae0e8
+Building traverser... (this can take a few minutes)
+Done
+Loading game
+Loading runner
+Training IEM_E_PPO on classical_phantom_ttt for 10000000 steps with exploitability computation
+Running in safe mode
+[2026-03-31 11:30:11,040][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,041][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,041][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,041][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,041][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,041][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,042][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,042][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,042][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,042][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,042][absl][INFO] - Using game instance: phantom_ttt
+[2026-03-31 11:30:11,042][absl][INFO] - Using game instance: phantom_ttt
+9 found 0.18M infosets (0.18B nodes)
+[1774927788.294|>INFO] [traverser.cpp:296]   > thread 56 found 0.22M infosets (0.27B nodes)
+[1774927788.566|>INFO] [traverser.cpp:296]   > thread 68 found 0.20M infosets (0.23B nodes)
+[1774927788.780|>INFO] [traverser.cpp:296]   > thread 79 found 0.25M infosets (0.29B nodes)
+[1774927788.861|>INFO] [traverser.cpp:296]   > thread 65 found 0.16M infosets (0.18B nodes)
+[1774927788.903|>INFO] [traverser.cpp:296]   > thread 53 found 0.23M infosets (0.28B nodes)
+[1774927788.927|>INFO] [traverser.cpp:296]   > thread 40 found 0.45M infosets (0.28B nodes)
+[1774927790.271|>INFO] [traverser.cpp:296]   > thread 09 found 0.23M infosets (0.28B nodes)
+[1774927790.754|>INFO] [traverser.cpp:296]   > thread 01 found 0.25M infosets (0.29B nodes)
+[1774927792.053|>INFO] [traverser.cpp:296]   > thread 06 found 0.21M infosets (0.23B nodes)
+[1774927792.251|>INFO] [traverser.cpp:296]   > thread 62 found 0.21M infosets (0.23B nodes)
+[1774927792.387|>INFO] [traverser.cpp:296]   > thread 38 found 0.20M infosets (0.22B nodes)
+[1774927792.474|>INFO] [traverser.cpp:296]   > thread 33 found 0.23M infosets (0.28B nodes)
+[1774927792.908|>INFO] [traverser.cpp:296]   > thread 74 found 0.21M infosets (0.23B nodes)
+[1774927793.275|>INFO] [traverser.cpp:296]   > thread 22 found 0.18M infosets (0.21B nodes)
+[1774927793.833|>INFO] [traverser.cpp:296]   > thread 50 found 0.52M infosets (0.32B nodes)
+[1774927793.880|>INFO] [traverser.cpp:296]   > thread 26 found 0.21M infosets (0.23B nodes)
+[1774927793.949|>INFO] [traverser.cpp:296]   > thread 47 found 0.23M infosets (0.28B nodes)
+[1774927793.964|>INFO] [traverser.cpp:296]   > thread 44 found 0.20M infosets (0.22B nodes)
+[1774927794.025|>INFO] [traverser.cpp:296]   > thread 71 found 0.23M infosets (0.28B nodes)
+[1774927794.111|>INFO] [traverser.cpp:296]   > thread 77 found 0.25M infosets (0.29B nodes)
+[1774927794.333|>INFO] [traverser.cpp:296]   > thread 18 found 0.21M infosets (0.23B nodes)
+[1774927794.452|>INFO] [traverser.cpp:296]   > thread 14 found 0.20M infosets (0.23B nodes)
+[1774927796.428|>INFO] [traverser.cpp:296]   > thread 41 found 0.22M infosets (0.24B nodes)
+[1774927796.609|>INFO] [traverser.cpp:296]   > thread 30 found 0.52M infosets (0.32B nodes)
+[1774927796.705|>INFO] [traverser.cpp:296]   > thread 07 found 0.18M infosets (0.18B nodes)
+[1774927796.714|>INFO] [traverser.cpp:296]   > thread 02 found 0.21M infosets (0.23B nodes)
+[1774927798.084|>INFO] [traverser.cpp:296]   > thread 80 found 0.49M infosets (0.30B nodes)
+[1774927798.578|>INFO] [traverser.cpp:296]   > thread 34 found 0.20M infosets (0.23B nodes)
+[1774927799.559|>INFO] [traverser.cpp:296]   > thread 15 found 0.16M infosets (0.18B nodes)
+[1774927800.772|>INFO] [traverser.cpp:296]   > thread 23 found 0.25M infosets (0.29B nodes)
+[1774927800.789|>INFO] [traverser.cpp:296]   > thread 10 found 0.52M infosets (0.32B nodes)
+[1774927801.220|>INFO] [traverser.cpp:296]   > thread 27 found 0.23M infosets (0.28B nodes)
+[1774927801.796|>INFO] [traverser.cpp:296]   > thread 19 found 0.25M infosets (0.29B nodes)
+[1774927802.472|>INFO] [traverser.cpp:296]   > thread 31 found 0.19M infosets (0.23B nodes)
+[1774927803.072|>INFO] [traverser.cpp:296]   > thread 35 found 0.16M infosets (0.18B nodes)
+[1774927804.258|>INFO] [traverser.cpp:296]   > thread 03 found 0.25M infosets (0.29B nodes)
+[1774927808.149|>INFO] [traverser.cpp:296]   > thread 11 found 0.23M infosets (0.28B nodes)
+[1774927808.154|>INFO] [traverser.cpp:307] ... discovery terminated. Found 5.99M infosets across 19.93B nodes
+[1774927808.182|>INFO] [traverser.cpp:352] sorting infoset and assigning indices for player 2...
+[1774927808.193|>INFO] [traverser.cpp:352] sorting infoset and assigning indices for player 1...
+[1774927811.031|>INFO] [traverser.cpp:383] ... all done.
+[1774928255.743|>INFO] [traverser.cpp:464] begin exploitability computation...
+[1774928255.743|>INFO] [traverser.cpp:388] begin gradient computation (num threads: 24)...
+[1774928268.331|>INFO] [traverser.cpp:436]   > 10/81 threads returned
+[1774928272.015|>INFO] [traverser.cpp:436]   > 20/81 threads returned
+[1774928278.226|>INFO] [traverser.cpp:436]   > 30/81 threads returned
+[1774928283.596|>INFO] [traverser.cpp:436]   > 40/81 threads returned
+[1774928289.372|>INFO] [traverser.cpp:436]   > 50/81 threads returned
+[1774928292.484|>INFO] [traverser.cpp:436]   > 60/81 threads returned
+[1774928300.267|>INFO] [traverser.cpp:436]   > 70/81 threads returned
+[1774928310.494|>INFO] [traverser.cpp:436]   > 80/81 threads returned
+[1774928315.437|>INFO] [traverser.cpp:441] ... aggregating thread buffers...
+[1774928315.675|>INFO] [traverser.cpp:451] ... all done.
+[1774928315.848|>INFO] [traverser.cpp:469] computing expected value...
+[1774928316.109|>INFO] [traverser.cpp:480] computing exploitabilities...
+[1774928316.490|>INFO] [traverser.cpp:486] ... all done. (ev0 = 0.282168, expl = 0.886239, 0.669503)
+[1774928778.437|>INFO] [traverser.cpp:464] begin exploitability computation...
+[1774928778.437|>INFO] [traverser.cpp:388] begin gradient computation (num threads: 24)...
+[1774928791.576|>INFO] [traverser.cpp:436]   > 10/81 threads returned
+[1774928795.459|>INFO] [traverser.cpp:436]   > 20/81 threads returned
+[1774928800.947|>INFO] [traverser.cpp:436]   > 30/81 threads returned
+[1774928806.481|>INFO] [traverser.cpp:436]   > 40/81 threads returned
+[1774928811.974|>INFO] [traverser.cpp:436]   > 50/81 threads returned
+[1774928815.643|>INFO] [traverser.cpp:436]   > 60/81 threads returned
+[1774928821.804|>INFO] [traverser.cpp:436]   > 70/81 threads returned
+[1774928833.756|>INFO] [traverser.cpp:436]   > 80/81 threads returned
+[1774928838.369|>INFO] [traverser.cpp:441] ... aggregating thread buffers...
+[1774928838.609|>INFO] [traverser.cpp:451] ... all done.
+[1774928838.782|>INFO] [traverser.cpp:469] computing expected value...
+[1774928839.043|>INFO] [traverser.cpp:480] computing exploitabilities...
+[1774928839.421|>INFO] [traverser.cpp:486] ... all done. (ev0 = 0.289412, expl = 0.814751, 0.666624)
+[1774929302.621|>INFO] [traverser.cpp:464] begin exploitability computation...
+[1774929302.621|>INFO] [traverser.cpp:388] begin gradient computation (num threads: 24)...
+[1774929315.873|>INFO] [traverser.cpp:436]   > 10/81 threads returned
+[1774929318.816|>INFO] [traverser.cpp:436]   > 20/81 threads returned
+[1774929325.203|>INFO] [traverser.cpp:436]   > 30/81 threads returned
+[1774929330.381|>INFO] [traverser.cpp:436]   > 40/81 threads returned
+[1774929336.475|>INFO] [traverser.cpp:436]   > 50/81 threads returned
+[1774929339.829|>INFO] [traverser.cpp:436]   > 60/81 threads returned
+[1774929346.214|>INFO] [traverser.cpp:436]   > 70/81 threads returned
+[1774929357.268|>INFO] [traverser.cpp:436]   > 80/81 threads returned
+[1774929359.330|>INFO] [traverser.cpp:441] ... aggregating thread buffers...
+[1774929359.570|>INFO] [traverser.cpp:451] ... all done.
+[1774929359.743|>INFO] [traverser.cpp:469] computing expected value...
+[1774929360.005|>INFO] [traverser.cpp:480] computing exploitabilities...
+[1774929360.385|>INFO] [traverser.cpp:486] ... all done. (ev0 = 0.312625, expl = 0.738369, 0.636754)
+[1774929829.753|>INFO] [traverser.cpp:464] begin exploitability computation...
+[1774929829.753|>INFO] [traverser.cpp:388] begin gradient computation (num threads: 24)...
+[1774929842.847|>INFO] [traverser.cpp:436]   > 10/81 threads returned
+[1774929845.631|>INFO] [traverser.cpp:436]   > 20/81 threads returned
+[1774929851.833|>INFO] [traverser.cpp:436]   > 30/81 threads returned
+[1774929857.535|>INFO] [traverser.cpp:436]   > 40/81 threads returned
+[1774929863.262|>INFO] [traverser.cpp:436]   > 50/81 threads returned
+[1774929866.573|>INFO] [traverser.cpp:436]   > 60/81 threads returned
+[1774929874.909|>INFO] [traverser.cpp:436]   > 70/81 threads returned
+[1774929884.361|>INFO] [traverser.cpp:436]   > 80/81 threads returned
+[1774929889.275|>INFO] [traverser.cpp:441] ... aggregating thread buffers...
+[1774929889.514|>INFO] [traverser.cpp:451] ... all done.
+[1774929889.687|>INFO] [traverser.cpp:469] computing expected value...
+[1774929889.948|>INFO] [traverser.cpp:480] computing exploitabilities...
+[1774929890.326|>INFO] [traverser.cpp:486] ... all done0.9995 decay value for count hasher
+0.05 iem c1 value
+0.9995 decay value for count hasher
+0.05 iem c1 value
+Using Tsallis-PPO with IEM + epsilon-revival exploration
+Tsallis q: 2.0, beta: 1.0, policy_head: sparsemax, epsilon_start: 0.2, epsilon_end: 0.1
+Computing exploitability... (this can take a few minutes)
+avg_score_response=0.7778708780892903
+Computing exploitability... (this can take a few minutes)
+avg_score_response=0.7406873175268343
+Computing exploitability... (this can take a few minutes)
+avg_score_response=0.6875612395877166
+Computing exploitability... (this can take a few minutes)
+avg_score_response=0.6377578427288282
+Computing exploitability... (this can take a few minutes)
+avg_score_response=0.6153649684355009
+Computing exploitability... (this can take a few minutes)
+avg_score_response=0.6153649684355009
+Training finished!
+. (ev0 = 0.340898, expl = 0.679036, 0.596480)
+[1774930357.677|>INFO] [traverser.cpp:464] begin exploitability computation...
+[1774930357.677|>INFO] [traverser.cpp:388] begin gradient computation (num threads: 24)...
+[1774930370.212|>INFO] [traverser.cpp:436]   > 10/81 threads returned
+[1774930375.000|>INFO] [traverser.cpp:436]   > 20/81 threads returned
+[1774930380.543|>INFO] [traverser.cpp:436]   > 30/81 threads returned
+[1774930384.651|>INFO] [traverser.cpp:436]   > 40/81 threads returned
+[1774930391.368|>INFO] [traverser.cpp:436]   > 50/81 threads returned
+[1774930395.262|>INFO] [traverser.cpp:436]   > 60/81 threads returned
+[1774930402.407|>INFO] [traverser.cpp:436]   > 70/81 threads returned
+[1774930412.312|>INFO] [traverser.cpp:436]   > 80/81 threads returned
+[1774930413.939|>INFO] [traverser.cpp:441] ... aggregating thread buffers...
+[1774930414.179|>INFO] [traverser.cpp:451] ... all done.
+[1774930414.351|>INFO] [traverser.cpp:469] computing expected value...
+[1774930414.613|>INFO] [traverser.cpp:480] computing exploitabilities...
+[1774930414.992|>INFO] [traverser.cpp:486] ... all done. (ev0 = 0.343863, expl = 0.646676, 0.584054)
+[1774930426.857|>INFO] [traverser.cpp:464] begin exploitability computation...
+[1774930426.857|>INFO] [traverser.cpp:388] begin gradient computation (num threads: 24)...
+[1774930439.977|>INFO] [traverser.cpp:436]   > 10/81 threads returned
+[1774930443.887|>INFO] [traverser.cpp:436]   > 20/81 threads returned
+[1774930449.652|>INFO] [traverser.cpp:436]   > 30/81 threads returned
+[1774930454.229|>INFO] [traverser.cpp:436]   > 40/81 threads returned
+[1774930460.613|>INFO] [traverser.cpp:436]   > 50/81 threads returned
+[1774930464.174|>INFO] [traverser.cpp:436]   > 60/81 threads returned
+[1774930470.557|>INFO] [traverser.cpp:436]   > 70/81 threads returned
+[1774930481.802|>INFO] [traverser.cpp:436]   > 80/81 threads returned
+[1774930483.099|>INFO] [traverser.cpp:441] ... aggregating thread buffers...
+[1774930483.338|>INFO] [traverser.cpp:451] ... all done.
+[1774930483.510|>INFO] [traverser.cpp:469] computing expected value...
+[1774930483.770|>INFO] [traverser.cpp:480] computing exploitabilities...
+[1774930484.152|>INFO] [traverser.cpp:486] ... all done. (ev0 = 0.343863, expl = 0.646676, 0.584054)

@@ -93,7 +93,9 @@ class PPOAgent(nn.Module):
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         if legal_actions_mask is None:
-            legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
+            legal_actions_mask = torch.ones(
+                (len(x), self.num_actions), dtype=torch.bool, device=x.device
+            )
 
         logits = self.actor(x)
         probs = CategoricalMasked(
@@ -139,7 +141,9 @@ class PPOAtariAgent(nn.Module):
 
     def get_action_and_value(self, x, legal_actions_mask=None, action=None):
         if legal_actions_mask is None:
-            legal_actions_mask = torch.ones((len(x), self.num_actions)).bool()
+            legal_actions_mask = torch.ones(
+                (len(x), self.num_actions), dtype=torch.bool, device=x.device
+            )
 
         hidden = self.network(x / 255.0)
         logits = self.actor(hidden)
@@ -267,9 +271,9 @@ class PPO(nn.Module):
         self.rewards = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
         self.dones = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
         self.values = torch.zeros((self.steps_per_batch, self.num_envs)).to(device)
-        self.current_players = torch.zeros((self.steps_per_batch, self.num_envs)).to(
-            device
-        )
+        self.current_players = torch.zeros(
+            (self.steps_per_batch, self.num_envs), dtype=torch.int64
+        ).to(device)
 
         # Initialize counters
         self.cur_batch_idx = 0
@@ -392,7 +396,11 @@ class PPO(nn.Module):
                     [ts.observations["legal_actions"][ts.current_player()] for ts in time_step],
                     self.num_actions,
                 ).to(self.device)
-                current_players = torch.Tensor([ts.current_player() for ts in time_step]).to(self.device)
+                current_players = torch.as_tensor(
+                    [ts.current_player() for ts in time_step],
+                    device=self.device,
+                    dtype=torch.int64,
+                )
 
                 action, logprob, entropy, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
 
@@ -474,21 +482,21 @@ class PPO(nn.Module):
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
-            b_dones = self.dones.reshape(-1)
+            b_dones = self.dones.reshape(-1).to(self.device)
 
             alive = (b_dones == 0)
-            mask0 = (b_players == 0) & alive
+            mask0 = ((b_players == 0) & alive).to(self.device)
             if mask0.any():
                 _i1 = self.iem_p0.update(b_obs_full[mask0])   # trains predictor + increments counts
 
-            mask1 = (b_players == 1) & alive
+            mask1 = ((b_players == 1) & alive).to(self.device)
             if mask1.any():
                 _i2 = self.iem_p1.update(b_obs_full[mask1])
 
             with torch.no_grad():
-                mask0 = (b_players == 0) & alive
+                mask0 = ((b_players == 0) & alive).to(self.device)
                 if mask0.any():
-                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0])  # [#mask0]
+                    r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0]).to(self.device)  # [#mask0]
                     tmp0 = torch.zeros_like(b_rint)
                     tmp0[mask0] = r0
 
@@ -500,9 +508,9 @@ class PPO(nn.Module):
 
                     b_rint += self.beta * tmp0
 
-                mask1 = (b_players == 1) & alive
+                mask1 = ((b_players == 1) & alive).to(self.device)
                 if mask1.any():
-                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1])  # [#mask1]
+                    r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1]).to(self.device)  # [#mask1]
                     tmp1 = torch.zeros_like(b_rint)
                     tmp1[mask1] = r1
 
@@ -674,7 +682,7 @@ class PPO(nn.Module):
         torch.save(self.network.actor.state_dict(), path)
 
     def load(self, path):
-        self.network.actor.load_state_dict(torch.load(path))
+        self.network.actor.load_state_dict(torch.load(path, map_location=self.device))
 
     def anneal_learning_rate(self, update, num_total_updates):
         frac = max(0, 1.0 - (update / num_total_updates))
