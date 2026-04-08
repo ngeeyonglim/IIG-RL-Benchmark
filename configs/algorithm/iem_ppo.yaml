@@ -40,12 +40,12 @@ update_epochs: 1
 norm_adv: true
 clip_coef: 0.05
 clip_vloss: true
-ent_coef: 0.1
+ent_coef: 0.15
 vf_coef: 0.0625
 max_grad_norm: 2.0
 target_kl: null
 iem_lr: 0.001
-alpha: 0.5
+alpha: 0.40
 beta: 3.0
 
 

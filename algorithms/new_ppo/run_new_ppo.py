@@ -110,7 +110,6 @@ class RunPPO:
                 iem_p0=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
                 iem_p1=IEModule(game.information_state_tensor_size(), lr=self.config.iem_lr, alpha=self.config.alpha),
                 beta=self.config.beta,
-                tsallis_q=self.config.tsallis_q
             )
         else:
             self.agent = PPO(

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An implementation of MEC-PPO.
+"""An implementation of MEC-PPO with tsallis entropy
 
 Merged Implementation: IEM-PPO with Minimum Entropy Constraint (MEC).
 Exploration: Uses IEM to add intrinsic rewards to advantages.
@@ -218,6 +218,7 @@ class PPO(nn.Module):
         beta=0.1,
         entropy_target=0.6,
         hinge_coef=1.0,
+        tsallis_q=2.0,
         **kwargs,
     ):
         super().__init__()
@@ -285,6 +286,12 @@ class PPO(nn.Module):
         self.iem_p0 = iem_p0
         self.iem_p1 = iem_p1
 
+
+        # Ensure IEM modules (if present) are on the same device as PPO tensors
+        if self.iem_p0 is not None and hasattr(self.iem_p0, "to"):
+            self.iem_p0 = self.iem_p0.to(self.device)
+        if self.iem_p1 is not None and hasattr(self.iem_p1, "to"):
+            self.iem_p1 = self.iem_p1.to(self.device)
         # Init for entropy logging (1)
         self.accumulated_entropy = 0.0
         self.entropy_count = 0
@@ -327,6 +334,23 @@ class PPO(nn.Module):
                 f.write("steps,player,bucket_id,count\n")
 
         self.visitation_quantize = True
+
+
+        # ----------------------------
+        # Tsallis policy-support probe logging (aggregate, per log interval)
+        # ----------------------------
+        self.track_policy_probe = kwargs.get("track_policy_probe", True)
+        self.policy_probe_small_prob_eps = float(kwargs.get("policy_probe_small_prob_eps", 1e-3))
+        self.policy_probe_zero_tol = float(kwargs.get("policy_probe_zero_tol", 1e-12))
+        self._reset_policy_probe_stats()
+
+        self.tsallis_q = float(tsallis_q)
+        # hard guard against tsallis = 1
+        if abs(self.tsallis_q - 1.0) < 1e-8:
+            raise ValueError("tsallis_q must be != 1.0 (q=1 corresponds to Shannon entropy).")
+        
+        print("Using Tsallis PPO")
+
 
     def get_value(self, x):
         return self.network.get_value(x)
@@ -374,6 +398,155 @@ class PPO(nn.Module):
 
         # fast, stable hash; 8 bytes digest is enough for logging
         return hashlib.blake2b(xb, digest_size=8).hexdigest()
+    
+    def _tsallis_entropy_norm(self, probs: torch.Tensor, legal_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Normalized Tsallis entropy in [0, 1] for categorical policies with varying legal action counts.
+
+        probs:      [B, A] probabilities (from CategoricalMasked, already close to masked)
+        legal_mask: [B, A] bool
+
+        Returns:
+        ent_norm: [B] normalized Tsallis entropy
+        """
+        eps = 1e-12
+        q = self.tsallis_q
+
+        # Re-mask and renormalize to be safe (important when using probs.probs)
+        p = probs * legal_mask.to(probs.dtype)
+        p = p / (p.sum(dim=-1, keepdim=True) + eps)
+        p = torch.clamp(p, min=0.0, max=1.0)
+
+        # Tsallis entropy: H_q(p) = (1 - sum_i p_i^q) / (q - 1)
+        sum_pq = (p ** q).sum(dim=-1)              # [B]
+        Hq = (1.0 - sum_pq) / (q - 1.0)            # [B]
+
+        # Normalize by maximum Tsallis entropy for n legal actions:
+        # H_q^max(n) = (1 - n^(1-q)) / (q - 1)
+        n = legal_mask.sum(dim=-1).to(probs.dtype)  # [B]
+        n = torch.clamp(n, min=1.0)
+        Hq_max = (1.0 - n ** (1.0 - q)) / (q - 1.0)
+
+        ent_norm = Hq / (Hq_max + eps)
+        return torch.clamp(ent_norm, 0.0, 1.0)
+
+
+
+    def _reset_policy_probe_stats(self):
+        """Reset aggregate policy-support probe statistics for the current log interval."""
+        self._policy_probe = {
+            0: {
+                "n": 0,
+                "sum_num_legal_actions": 0.0,
+                "sum_support_size_nonzero": 0.0,
+                "sum_support_fraction": 0.0,
+                "sum_num_zero_prob_actions": 0.0,
+                "sum_num_small_positive_actions": 0.0,
+                "sum_top1_prob": 0.0,
+                "sum_top2_prob": 0.0,
+                "sum_top1_minus_top2": 0.0,
+                "sum_policy_n2": 0.0,
+                "sum_shannon_entropy": 0.0,
+                "sum_tsallis_entropy_norm": 0.0,
+            },
+            1: {
+                "n": 0,
+                "sum_num_legal_actions": 0.0,
+                "sum_support_size_nonzero": 0.0,
+                "sum_support_fraction": 0.0,
+                "sum_num_zero_prob_actions": 0.0,
+                "sum_num_small_positive_actions": 0.0,
+                "sum_top1_prob": 0.0,
+                "sum_top2_prob": 0.0,
+                "sum_top1_minus_top2": 0.0,
+                "sum_policy_n2": 0.0,
+                "sum_shannon_entropy": 0.0,
+                "sum_tsallis_entropy_norm": 0.0,
+            },
+        }
+
+    @torch.no_grad()
+    def _accumulate_policy_probe_stats(
+        self,
+        probs: torch.Tensor,
+        legal_actions_mask: torch.Tensor,
+        current_players: torch.Tensor,
+    ):
+        """
+        Aggregate Tsallis policy-support diagnostics over sampled infosets.
+
+        Logs, per player (aggregated over the current log interval):
+          - legal action count
+          - support size / support fraction
+          - number of legal actions with exactly-zero (within tolerance) probability
+          - number of legal actions with small positive probability (0 < p < eps)
+          - top1/top2 probabilities and margin
+          - Shannon entropy, normalized Tsallis entropy, and policy Hill-N2
+        """
+        if not self.track_policy_probe:
+            return
+
+        if probs.numel() == 0:
+            return
+
+        eps = 1e-12
+        small_eps = self.policy_probe_small_prob_eps
+        zero_tol = self.policy_probe_zero_tol
+
+        legal = legal_actions_mask.bool()
+        p = probs * legal.to(probs.dtype)
+        p = p / (p.sum(dim=-1, keepdim=True) + eps)
+        p = torch.clamp(p, min=0.0, max=1.0)
+
+        num_legal = legal.sum(dim=-1)
+        support_nonzero = ((p > zero_tol) & legal).sum(dim=-1)
+        num_zero = ((p <= zero_tol) & legal).sum(dim=-1)
+        num_small_pos = ((p > zero_tol) & (p < small_eps) & legal).sum(dim=-1)
+
+        support_fraction = support_nonzero.to(p.dtype) / torch.clamp(
+            num_legal.to(p.dtype), min=1.0
+        )
+
+        p_for_sort = p.masked_fill(~legal, -1.0)
+        sorted_p, _ = torch.sort(p_for_sort, dim=-1, descending=True)
+        top1 = sorted_p[:, 0]
+        if p.shape[-1] >= 2:
+            top2 = sorted_p[:, 1]
+            top2 = torch.clamp(top2, min=0.0)
+        else:
+            top2 = torch.zeros_like(top1)
+        top1_minus_top2 = top1 - top2
+
+        shannon_ent = -(p * torch.log(p + eps) * legal.to(p.dtype)).sum(dim=-1)
+        policy_n2 = 1.0 / torch.clamp((p * p).sum(dim=-1), min=eps)
+        tsallis_ent_norm = self._tsallis_entropy_norm(p, legal)
+
+        players = current_players.detach().to(torch.int64).view(-1)
+        for player_id in (0, 1):
+            mask = players == player_id
+            if not torch.any(mask):
+                continue
+            s = self._policy_probe[player_id]
+            s["n"] += int(mask.sum().item())
+            s["sum_num_legal_actions"] += float(
+                num_legal[mask].to(torch.float32).sum().item()
+            )
+            s["sum_support_size_nonzero"] += float(
+                support_nonzero[mask].to(torch.float32).sum().item()
+            )
+            s["sum_support_fraction"] += float(support_fraction[mask].sum().item())
+            s["sum_num_zero_prob_actions"] += float(
+                num_zero[mask].to(torch.float32).sum().item()
+            )
+            s["sum_num_small_positive_actions"] += float(
+                num_small_pos[mask].to(torch.float32).sum().item()
+            )
+            s["sum_top1_prob"] += float(top1[mask].sum().item())
+            s["sum_top2_prob"] += float(top2[mask].sum().item())
+            s["sum_top1_minus_top2"] += float(top1_minus_top2[mask].sum().item())
+            s["sum_policy_n2"] += float(policy_n2[mask].sum().item())
+            s["sum_shannon_entropy"] += float(shannon_ent[mask].sum().item())
+            s["sum_tsallis_entropy_norm"] += float(tsallis_ent_norm[mask].sum().item())
 
     def step(self, time_step, is_evaluation=False):
         if is_evaluation:
@@ -402,7 +575,7 @@ class PPO(nn.Module):
                     dtype=torch.int64,
                 )
 
-                action, logprob, entropy, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
+                action, logprob, _, value, probs = self.get_action_and_value(obs, legal_actions_mask=legal_actions_mask)
 
                 self.legal_actions_mask[self.cur_batch_idx] = legal_actions_mask
                 self.obs[self.cur_batch_idx] = obs
@@ -410,8 +583,16 @@ class PPO(nn.Module):
                 self.logprobs[self.cur_batch_idx] = logprob
                 self.values[self.cur_batch_idx] = value.flatten()
                 self.current_players[self.cur_batch_idx] = current_players
-                self.accumulated_entropy += entropy.mean().item()
+                # self.accumulated_entropy += entropy.mean().item()
+                # self.entropy_count += 1
+                tsallis_ent = self._tsallis_entropy_norm(probs, legal_actions_mask)  # [num_envs]
+                self.accumulated_entropy += tsallis_ent.mean().item()
                 self.entropy_count += 1
+
+                # Aggregate Tsallis policy-support probe diagnostics on sampled infosets
+                self._accumulate_policy_probe_stats(
+                    probs, legal_actions_mask, current_players
+                )
 
                 agent_output = [StepOutput(action=a.item(), probs=p) for (a, p) in zip(action, probs)]
                 return agent_output
@@ -482,19 +663,19 @@ class PPO(nn.Module):
 
         if (self.iem_p1 is not None) and (self.iem_p0 is not None):
             b_obs_full = self.obs.reshape((-1,) + self.input_shape)  # [B, D]
-            b_dones = self.dones.reshape(-1).to(self.device)
+            b_dones = self.dones.reshape(-1)
 
             alive = (b_dones == 0)
-            mask0 = ((b_players == 0) & alive).to(self.device)
+            mask0 = (b_players == 0) & alive
             if mask0.any():
                 _i1 = self.iem_p0.update(b_obs_full[mask0])   # trains predictor + increments counts
 
-            mask1 = ((b_players == 1) & alive).to(self.device)
+            mask1 = (b_players == 1) & alive
             if mask1.any():
                 _i2 = self.iem_p1.update(b_obs_full[mask1])
 
             with torch.no_grad():
-                mask0 = ((b_players == 0) & alive).to(self.device)
+                mask0 = (b_players == 0) & alive
                 if mask0.any():
                     r0 = self.iem_p0.intrinsic_reward(b_obs_full[mask0]).to(self.device)  # [#mask0]
                     tmp0 = torch.zeros_like(b_rint)
@@ -508,7 +689,7 @@ class PPO(nn.Module):
 
                     b_rint += self.beta * tmp0
 
-                mask1 = ((b_players == 1) & alive).to(self.device)
+                mask1 = (b_players == 1) & alive
                 if mask1.any():
                     r1 = self.iem_p1.intrinsic_reward(b_obs_full[mask1]).to(self.device)  # [#mask1]
                     tmp1 = torch.zeros_like(b_rint)
@@ -547,7 +728,7 @@ class PPO(nn.Module):
                 end = start + self.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue, _ = self.get_action_and_value(
+                _, newlogprob, _, newvalue, new_probs = self.get_action_and_value(
                     b_obs[mb_inds],
                     legal_actions_mask=b_legal_actions_mask[mb_inds],
                     action=b_actions.long()[mb_inds],
@@ -580,7 +761,8 @@ class PPO(nn.Module):
                 else:
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
-                entropy_loss = entropy.mean()
+                tsallis_ent = self._tsallis_entropy_norm(new_probs, b_legal_actions_mask[mb_inds])  # [mb]
+                entropy_loss = tsallis_ent.mean()
                 
                 # With Hinge Loss:
                 hinge_penalty = torch.clamp(
@@ -612,6 +794,29 @@ class PPO(nn.Module):
                 "steps": self.total_steps_done,
                 "avg_entropy": avg_entropy
             }
+
+            # Policy-support probe summary (aggregate over sampled infosets)
+            if self.track_policy_probe:
+                for player_id in (0, 1):
+                    s = self._policy_probe[player_id]
+                    n = max(1, int(s["n"]))
+                    prefix = f"policy_probe_p{player_id}"
+                    log_data.update({
+                        f"{prefix}_count": int(s["n"]),
+                        f"{prefix}_small_prob_eps": float(self.policy_probe_small_prob_eps),
+                        f"{prefix}_zero_tol": float(self.policy_probe_zero_tol),
+                        f"{prefix}_mean_num_legal_actions": s["sum_num_legal_actions"] / n,
+                        f"{prefix}_mean_support_size_nonzero": s["sum_support_size_nonzero"] / n,
+                        f"{prefix}_mean_support_fraction": s["sum_support_fraction"] / n,
+                        f"{prefix}_mean_num_zero_prob_actions": s["sum_num_zero_prob_actions"] / n,
+                        f"{prefix}_mean_num_small_positive_actions": s["sum_num_small_positive_actions"] / n,
+                        f"{prefix}_mean_top1_prob": s["sum_top1_prob"] / n,
+                        f"{prefix}_mean_top2_prob": s["sum_top2_prob"] / n,
+                        f"{prefix}_mean_top1_minus_top2": s["sum_top1_minus_top2"] / n,
+                        f"{prefix}_mean_policy_n2": s["sum_policy_n2"] / n,
+                        f"{prefix}_mean_policy_shannon_entropy": s["sum_shannon_entropy"] / n,
+                        f"{prefix}_mean_policy_tsallis_entropy_norm": s["sum_tsallis_entropy_norm"] / n,
+                    })
 
             # Visitation logging (interval)
             if self.track_visitation:
@@ -671,6 +876,7 @@ class PPO(nn.Module):
             self.accumulated_entropy = 0.0
             self.entropy_count = 0
             self.last_log_step = self.total_steps_done
+            self._reset_policy_probe_stats()
 
         
         self.updates_done += 1
